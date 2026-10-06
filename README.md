@@ -65,14 +65,17 @@ source <your_colcon_workspace>/install/setup.bash
 ```
 
 ```bash
-# 1) the estimator (starts both nodes)
-ros2 launch msckf_vio msckf_vio_euroc.launch.py
+# 1) the estimator, with rviz2 alongside it
+ros2 launch msckf_vio msckf_vio_euroc_viz.launch.py
 
-# 2) rviz2
-ros2 run rviz2 rviz2 -d $(ros2 pkg prefix msckf_vio)/share/msckf_vio/rviz/rviz_euroc_config.rviz
-
-# 3) the dataset
+# 2) the dataset
 ros2 bag play <bag_dir> --topics /imu0 /cam0/image_raw /cam1/image_raw
+```
+
+To start rviz2 separately instead (or on another machine), drop `_viz` and run:
+
+```bash
+ros2 run rviz2 rviz2 -d $(ros2 pkg prefix msckf_vio)/share/msckf_vio/rviz/rviz_euroc_config.rviz
 ```
 
 `/odom` starts about a second into the bag, once 200 IMU messages have been consumed to initialize the gravity direction and the IMU biases.
@@ -245,13 +248,62 @@ or `ros2 launch msckf_vio reset.launch.py`. Note that this is not an anytime res
 | File | Purpose |
 | --- | --- |
 | `msckf_vio_euroc.launch.py` | EuRoC: `image_processor` + `vio` |
+| `msckf_vio_euroc_viz.launch.py` | EuRoC, plus rviz2 with the trajectory display |
 | `image_processor_euroc.launch.py` | EuRoC: `image_processor` only |
 | `msckf_vio_euroc_noextrinsics.launch.py` | EuRoC with the extrinsics estimated |
 | `msckf_vio_fla.launch.py` | Fast flight: `image_processor` + `vio` |
 | `image_processor_fla.launch.py` | Fast flight: `image_processor` only |
 | `reset.launch.py` | Calls the reset service |
 
-All of them accept `imu_topic`, `cam0_topic` and `cam1_topic` to override the input topics.
+All of them accept `imu_topic`, `cam0_topic` and `cam1_topic` to override the input topics. The viz variant also takes `rviz:=false` to skip rviz2.
+
+---
+
+## Evaluating accuracy with evo
+
+The scripts in `scripts/` record a run and turn it into numbers with [evo](https://github.com/MichaelGrupp/evo). Install evo with `pip install evo`.
+
+**1. Run the estimator and record the trajectory.** In the terminal that plays the bag, leave the estimator running; in a second one:
+
+```bash
+python3 $(ros2 pkg prefix msckf_vio)/share/msckf_vio/scripts/record_odom.py /tmp/est.txt
+```
+
+It runs until Ctrl-C, writing `/odom` as it arrives.
+
+**2. Convert the ground truth.** EuRoC ships it under `mav0/state_groundtruth_estimate0/data.csv` in the ASL column order, which evo does not read:
+
+```bash
+python3 $(ros2 pkg prefix msckf_vio)/share/msckf_vio/scripts/gt_asl_to_tum.py \
+    <seq>/mav0/state_groundtruth_estimate0/data.csv /tmp/gt.txt
+```
+
+**3. Compare.**
+
+```bash
+# absolute trajectory error, SE(3)-aligned (scale NOT free - VIO scale is observable)
+evo_ape tum /tmp/gt.txt /tmp/est.txt -a
+
+# relative pose error over 1 m, and over ~1 s (20 frames at 20 Hz)
+evo_rpe tum /tmp/gt.txt /tmp/est.txt -a -d 1 -u m
+evo_rpe tum /tmp/gt.txt /tmp/est.txt -a -d 20 -u f
+
+# rotational error
+evo_rpe tum /tmp/gt.txt /tmp/est.txt -a -d 1 -u m -r angle_deg
+```
+
+Use SE(3) alignment (`-a`), not Sim(3) (`-as`): VIO observes metric scale, so letting the alignment absorb a scale error would hide a real failure. Running both is a useful check — if they disagree much, the scale is off.
+
+For reference, on EuRoC `V2_01_easy` this implementation gives ATE RMSE **0.070 m** and RPE RMSE **0.044 m / 1 m** with a scale factor of **1.0069** from the Sim(3) fit, over 2200 poses covering 98% of the sequence.
+
+**If evo's plotting fails** with `cannot import name 'docstring' from 'matplotlib'`, the machine has both an apt and a pip matplotlib and Debian's `matplotlib-3.5.1-nspkg.pth` pins `mpl_toolkits` to the apt copy. `scripts/evo_run.py` works around it (see its docstring for the details); the reported numbers are unaffected either way:
+
+```bash
+python3 $(ros2 pkg prefix msckf_vio)/share/msckf_vio/scripts/evo_run.py \
+    ape tum /tmp/gt.txt /tmp/est.txt -a --save_plot /tmp/ape.png
+```
+
+Use `--save_plot`, not `--plot` — showing the window needs PyQt6. evo appends `_raw` and `_map` to the filename given.
 
 ---
 
