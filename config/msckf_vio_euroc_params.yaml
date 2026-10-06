@@ -1,0 +1,57 @@
+# ROS 2 parameters for msckf_vio.
+# Generated from the corresponding config/camchain-*.yaml calibration
+# file; regenerate with the same layout if the calibration changes.
+#
+# Usage:
+#   ros2 launch msckf_vio msckf_vio_euroc.launch.py
+image_processor:
+  ros__parameters:
+    cam0/distortion_model: radtan
+    cam0/resolution: [752, 480]
+    cam0/intrinsics: [458.654, 457.296, 367.215, 248.375]
+    cam0/distortion_coeffs: [-0.28340811, 0.07395907, 0.00019359, 1.76187114e-05]
+    cam0/T_cam_imu: [0.014865542981794, 0.999557249008346, -0.02577443669744, 0.065222909535531, -0.999880929698575, 0.014967213324719, 0.003756188357967, -0.020706385492719, 0.004140296794224, 0.025715529947966, 0.999660727177902, -0.00805460246003, 0.0, 0.0, 0.0, 1.0]
+    cam1/distortion_model: radtan
+    cam1/resolution: [752, 480]
+    cam1/intrinsics: [457.587, 456.134, 379.999, 255.238]
+    cam1/distortion_coeffs: [-0.28368365, 0.07451284, -0.00010473, -3.555907e-05]
+    cam1/T_cn_cnm1: [0.999997256477881, 0.002312067192424, 0.000376008102415, -0.110073808127187, -0.002317135723281, 0.999898048506644, 0.014089835846648, 0.000399121547014, -0.000343393120525, -0.014090668452714, 0.999900662637729, -0.000853702503357, 0.0, 0.0, 0.0, 1.0]
+    grid_row: 4
+    grid_col: 5
+    grid_min_feature_num: 3
+    grid_max_feature_num: 4
+    pyramid_levels: 3
+    patch_size: 15
+    fast_threshold: 10
+    max_iteration: 30
+    track_precision: 0.01
+    ransac_threshold: 3.0
+    stereo_threshold: 5.0
+vio:
+  ros__parameters:
+    cam0/T_cam_imu: [0.014865542981794, 0.999557249008346, -0.02577443669744, 0.065222909535531, -0.999880929698575, 0.014967213324719, 0.003756188357967, -0.020706385492719, 0.004140296794224, 0.025715529947966, 0.999660727177902, -0.00805460246003, 0.0, 0.0, 0.0, 1.0]
+    cam1/T_cn_cnm1: [0.999997256477881, 0.002312067192424, 0.000376008102415, -0.110073808127187, -0.002317135723281, 0.999898048506644, 0.014089835846648, 0.000399121547014, -0.000343393120525, -0.014090668452714, 0.999900662637729, -0.000853702503357, 0.0, 0.0, 0.0, 1.0]
+    T_imu_body: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    publish_tf: true
+    frame_rate: 20.0
+    fixed_frame_id: world
+    child_frame_id: odom
+    max_cam_state_size: 20
+    position_std_threshold: 8.0
+    rotation_threshold: 0.2618
+    translation_threshold: 0.4
+    tracking_rate_threshold: 0.5
+    feature/config/translation_threshold: -1.0
+    noise/gyro: 0.005
+    noise/acc: 0.05
+    noise/gyro_bias: 0.001
+    noise/acc_bias: 0.01
+    noise/feature: 0.035
+    initial_state/velocity/x: 0.0
+    initial_state/velocity/y: 0.0
+    initial_state/velocity/z: 0.0
+    initial_covariance/velocity: 0.25
+    initial_covariance/gyro_bias: 0.01
+    initial_covariance/acc_bias: 0.01
+    initial_covariance/extrinsic_rotation_cov: 0.00030462
+    initial_covariance/extrinsic_translation_cov: 2.5e-05
