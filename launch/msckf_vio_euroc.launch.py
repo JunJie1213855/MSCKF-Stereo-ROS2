@@ -16,13 +16,17 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
-    params_file = PathJoinSubstitution([
+    default_params_file = PathJoinSubstitution([
         FindPackageShare('msckf_vio'), 'config',
         'msckf_vio_euroc_params.yaml'])
+    params_file = LaunchConfiguration('params_file')
+    clock_parameters = {'use_sim_time': ParameterValue(
+        LaunchConfiguration('use_sim_time'), value_type=bool)}
 
     imu_topic = LaunchConfiguration('imu_topic')
     cam0_topic = LaunchConfiguration('cam0_topic')
@@ -45,7 +49,7 @@ def generate_launch_description():
         executable='image_processor_node',
         name='image_processor',
         output='screen',
-        parameters=[params_file],
+        parameters=[params_file, clock_parameters],
         remappings=[
             ('imu', imu_topic),
             ('cam0_image', cam0_topic),
@@ -61,7 +65,7 @@ def generate_launch_description():
         executable='msckf_vio_node',
         name='vio',
         output='screen',
-        parameters=[params_file],
+        parameters=[params_file, clock_parameters],
         remappings=[
             ('imu', imu_topic),
             ('features', '/image_processor/features'),
@@ -69,6 +73,10 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        DeclareLaunchArgument('params_file', default_value=default_params_file,
+                              description='Shared image processor and VIO calibration/parameters.'),
+        DeclareLaunchArgument('use_sim_time', default_value='false',
+                              description='Use the clock published by rosbag playback.'),
         declare_imu,
         declare_cam0,
         declare_cam1,

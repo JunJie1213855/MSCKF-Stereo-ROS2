@@ -32,6 +32,7 @@ find_package(Boost REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(SuiteSparse REQUIRED)
+find_package(Threads REQUIRED)
 
 ##################
 ## ROS messages ##
@@ -116,12 +117,32 @@ target_link_libraries(msckf_vio_node msckf_vio_lib)
 add_executable(image_processor_node src/image_processor_node.cpp)
 target_link_libraries(image_processor_node image_processor)
 
+# Dense stereo has no CUDA/TensorRT/PCL requirement. Add future matcher
+# implementations behind the StereoMatcher virtual interface.
+add_library(stereo_reconstruction_lib
+  src/stereo/stereo_matcher.cpp
+  src/stereo/reconstruction.cpp
+)
+target_include_directories(stereo_reconstruction_lib PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+  ${OpenCV_INCLUDE_DIRS}
+)
+target_link_libraries(stereo_reconstruction_lib Eigen3::Eigen ${OpenCV_LIBS})
+
+add_executable(stereo_reconstruction_node src/stereo_reconstruction_node.cpp)
+ament_target_dependencies(stereo_reconstruction_node
+  rclcpp std_msgs sensor_msgs nav_msgs geometry_msgs std_srvs
+  tf2_ros cv_bridge message_filters)
+target_link_libraries(stereo_reconstruction_node stereo_reconstruction_lib Threads::Threads)
+
 #############
 ## Install ##
 #############
 
 install(TARGETS
   msckf_vio_lib image_processor msckf_vio_node image_processor_node
+  stereo_reconstruction_lib stereo_reconstruction_node
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}
@@ -131,7 +152,7 @@ install(DIRECTORY include/${PROJECT_NAME}/
   DESTINATION include/${PROJECT_NAME}
 )
 
-install(DIRECTORY launch config rviz scripts
+install(DIRECTORY launch config rviz scripts docs
   DESTINATION share/${PROJECT_NAME}
 )
 
@@ -155,6 +176,9 @@ if(BUILD_TESTING)
   )
   target_include_directories(test_math_utils PRIVATE include)
   target_link_libraries(test_math_utils Eigen3::Eigen)
+
+  ament_add_gtest(test_stereo_reconstruction test/stereo_reconstruction_test.cpp)
+  target_link_libraries(test_stereo_reconstruction stereo_reconstruction_lib)
 endif()
 
 ament_package()
