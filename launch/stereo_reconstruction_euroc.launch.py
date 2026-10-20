@@ -40,7 +40,12 @@ def launch_nodes(context):
     if backend:
         matcher_overrides['backend'] = backend
     if engine_path:
-        matcher_overrides['igev.engine_path'] = engine_path
+        with open(reconstruction_path, encoding='utf-8') as stream:
+            configured = yaml.safe_load(stream)['stereo_reconstruction']['ros__parameters']
+        effective_backend = backend or configured.get('backend', 'sgbm')
+        if effective_backend not in ('igev', 's2m2'):
+            raise ValueError('engine_path requires backend:=igev or backend:=s2m2')
+        matcher_overrides[f'{effective_backend}.engine_path'] = engine_path
     vio_nodes = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(PathJoinSubstitution([
             pkg_share, 'launch', 'msckf_vio_euroc.launch.py'])),
@@ -77,9 +82,9 @@ def generate_launch_description():
         DeclareLaunchArgument('rviz', default_value='true'),
         DeclareLaunchArgument('use_sim_time', default_value='true'),
         DeclareLaunchArgument('backend', default_value='',
-                              description='Override the YAML backend: sgbm or igev.'),
+                              description='Override the YAML backend: sgbm, igev or s2m2.'),
         DeclareLaunchArgument('engine_path', default_value='',
-                              description='Override igev.engine_path with an absolute TensorRT engine path.'),
+                              description='Override the selected TensorRT backend engine_path (IGEV or S2M2).'),
         DeclareLaunchArgument('imu_topic', default_value='/imu0'),
         DeclareLaunchArgument('cam0_topic', default_value='/cam0/image_raw'),
         DeclareLaunchArgument('cam1_topic', default_value='/cam1/image_raw'),

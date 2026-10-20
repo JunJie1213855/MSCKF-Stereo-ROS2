@@ -117,10 +117,11 @@ target_link_libraries(msckf_vio_node msckf_vio_lib)
 add_executable(image_processor_node src/image_processor_node.cpp)
 target_link_libraries(image_processor_node image_processor)
 
-# SGBM and IGEV image processing are CPU-only; the TensorRT runtime is optional.
+# SGBM, IGEV and S2M2 image processing are CPU-only; the TensorRT runtime is optional.
 add_library(stereo_reconstruction_lib
   src/stereo/stereo_matcher.cpp
   src/stereo/igev_processing.cpp
+  src/stereo/s2m2_processing.cpp
   src/stereo/reconstruction.cpp
 )
 target_include_directories(stereo_reconstruction_lib PUBLIC
@@ -180,6 +181,9 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_stereo_reconstruction test/stereo_reconstruction_test.cpp)
   target_link_libraries(test_stereo_reconstruction stereo_reconstruction_lib)
+
+  ament_add_gtest(test_s2m2_processing test/s2m2_processing_test.cpp)
+  target_link_libraries(test_s2m2_processing stereo_reconstruction_lib)
 
   ament_add_gtest(test_igev_processing test/igev_processing_test.cpp)
   target_link_libraries(test_igev_processing stereo_reconstruction_lib)

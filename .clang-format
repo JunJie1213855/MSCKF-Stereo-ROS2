@@ -1,0 +1,21 @@
+BasedOnStyle: Google
+ColumnLimit: 80
+IndentWidth: 2
+SortIncludes: CaseSensitive
+# Keep control-flow stages explicit when reading the reconstruction pipeline.
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Never
+InsertBraces: true
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^<(algorithm|array|atomic|chrono|cinttypes|cmath|condition_variable|cstddef|cstdint|cstring|deque|exception|filesystem|fstream|functional|iomanip|iostream|iterator|limits|locale|map|memory|mutex|optional|stdexcept|string|thread|unordered_map|utility|vector)>$'
+    Priority: 1
+  - Regex: '^<'
+    Priority: 2
+  - Regex: '^"msckf_vio/'
+    Priority: 3
+  - Regex: '^"'
+    Priority: 2
+  - Regex: '.*'
+    Priority: 3

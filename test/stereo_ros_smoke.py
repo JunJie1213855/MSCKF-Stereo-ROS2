@@ -26,14 +26,14 @@ def main():
     parser.add_argument('--duration', type=float, default=15.0, help='Sensor seconds to replay')
     parser.add_argument('--rate', type=float, default=0.5)
     parser.add_argument('--domain-id', type=int, default=91)
-    parser.add_argument('--backend', choices=['sgbm', 'igev'], default='sgbm')
-    parser.add_argument('--engine', type=Path, help='Completed TensorRT engine for --backend igev')
+    parser.add_argument('--backend', choices=['sgbm', 'igev', 's2m2'], default='sgbm')
+    parser.add_argument('--engine', type=Path, help='Completed TensorRT engine for --backend igev/s2m2')
     parser.add_argument('--output', type=Path, default=Path('/tmp/msckf_stereo_euroc_validation'))
     args = parser.parse_args()
     if args.duration <= 2 or args.rate <= 0 or not 0 <= args.domain_id <= 232:
         parser.error('Use duration > 2, positive rate and a domain ID in [0,232]')
-    if args.backend == 'igev' and (not args.engine or not args.engine.is_file() or args.engine.stat().st_size == 0):
-        parser.error('--backend igev requires a nonempty --engine file')
+    if args.backend in ('igev', 's2m2') and (not args.engine or not args.engine.is_file() or args.engine.stat().st_size == 0):
+        parser.error('TensorRT backends require a nonempty --engine file')
     args.output.mkdir(parents=True, exist_ok=True)
     os.environ['ROS_DOMAIN_ID'] = str(args.domain_id)
     os.environ['ROS_LOCALHOST_ONLY'] = '1'
@@ -53,7 +53,7 @@ def main():
     config = yaml.safe_load((share / 'config/stereo_reconstruction_euroc_params.yaml').read_text())
     config['stereo_reconstruction']['ros__parameters']['backend'] = args.backend
     if args.engine:
-        config['stereo_reconstruction']['ros__parameters']['igev']['engine_path'] = str(args.engine.resolve())
+        config['stereo_reconstruction']['ros__parameters'][args.backend]['engine_path'] = str(args.engine.resolve())
     output_map = args.output / 'stereo_map.pcd'
     config['stereo_reconstruction']['ros__parameters']['save_map_path'] = str(output_map)
     parameter_path = args.output / 'parameters.yaml'

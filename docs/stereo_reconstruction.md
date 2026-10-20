@@ -1,7 +1,7 @@
 # EuRoC + MSCKF stereo point-cloud fusion
 
 The `stereo_reconstruction_node` runs independently of the MSCKF estimator. Its
-backends are OpenCV SGBM and IGEV on TensorRT 10.x, sharing the virtual
+backends are OpenCV SGBM, IGEV and S2M2 on TensorRT 10.x, sharing the virtual
 `StereoMatcher` interface. The default SGBM-only build needs no CUDA/TensorRT;
 the existing package dependencies still apply.
 
@@ -232,10 +232,76 @@ and synchronization errors. Extra engine outputs receive bindings; the named
 final disparity output is the one downloaded. Rectification, timestamp pose
 matching, keyframe selection and voxel fusion are shared with SGBM.
 
+## S2M2 TensorRT backend
+
+Build with the same `MSCKF_ENABLE_TENSORRT=ON` option as IGEV, then select
+`backend:=s2m2`. `engine_path` overrides `s2m2.engine_path` when that backend
+is selected (including when selection comes from the reconstruction YAML).
+
+```bash
+ros2 launch msckf_vio stereo_reconstruction_euroc.launch.py \
+  backend:=s2m2 \
+  engine_path:=/home/ros/ros_ws/msckf_vio/src/msckf_vio/weights/s2m2/S2M2_S_768_480_fp16.engine
+```
+
+The input/output contract follows the local `/home/ros/lib/s2m2` sources:
+`core/utils/image_utils.py:image_pad`, `core/model/s2m2.py:normalize_img`,
+and `core/utils/vis_utils.py:visualize_stereo_results_2d`.
+
+| Tensor | Type | EuRoC NCHW shape |
+|---|---|---|
+| `input_left`, `input_right` | RGB UINT8, 0–255 | `[1,3,480,768]` |
+| `output_disp` | FP32/FP16 pixel disparity | `[1,1,480,768]` |
+| `output_occ` | FP32/FP16 visibility (larger means visible) | `[1,1,480,768]` |
+| `output_conf` | FP32/FP16 confidence | `[1,1,480,768]` |
+
+Normalization is inside the exported model. The C++ preprocessing replicates
+mono images to three channels, converts BGR to RGB, and produces contiguous
+UINT8 NCHW. It reproduces the source's centered padding: zero-pad, adaptive
+average pool to `[original_H // 32, original_W // 32]`, bilinearly interpolate
+to the engine size, restore the original image in the center, and truncate
+float padding values to UINT8. This is neither plain zero padding nor edge
+replication. For EuRoC it adds 8 columns on each side. All three outputs are
+cropped identically; disparity remains in original-image pixels, with no
+`/16` conversion. Input images are never resized or transposed.
+
+Default valid pixels require `output_conf > 0.1`, `output_occ > 0.5` and finite,
+positive disparity, matching the upstream display mask. Invalid samples become
+NaN before depth projection and fusion. Thresholds are configurable through
+`s2m2.min_confidence` and `s2m2.min_visibility`. Quality maps are consumed
+internally; the public disparity/depth topics contain the filtered result.
+
+The `s2m2` YAML section also provides `engine_path`, `left_input_name`,
+`right_input_name`, `output_name`, `visibility_output_name`,
+`confidence_output_name`, `input_width`, `input_height` and `device_id`.
+Zero input dimensions read the engine dimensions; dynamic engines pad to a
+multiple of 32 using profile 0. Missing quality outputs or incompatible types
+are errors, rather than silently skipping the mask.
+
+**Check actual engine shapes, not filenames.** The initially supplied
+`weights/s2m2/S2M2_S_480_768_fp16.engine` has actual shape `[1,3,768,480]`
+(height 768, width 480). It can run portrait images, but cannot accept native
+EuRoC images (height 480, width 752). The re-exported
+`weights/s2m2/S2M2_S_768_480_fp16.engine` has the correct `[1,3,480,768]`
+inputs and `[1,1,480,768]` outputs; use this landscape engine for EuRoC.
+The node checks the calibrated image dimensions at startup and reports the
+mismatch. Changing YAML dimensions cannot change a fixed-shape engine.
+
+Local verification with this portrait engine and the upstream `0025_L/R`
+sample cropped to height 752, width 480 passed: C++ RGB UINT8 buffers matched
+the original Python `image_pad()` buffers byte-for-byte for both cameras.
+C++ and Python TensorRT produced identical valid-pixel masks (196,092 of
+360,960 pixels) and zero disparity difference on valid pixels after cropping
+and quality filtering. This checks preprocessing, bindings and postprocessing;
+it is not a depth accuracy benchmark or an end-to-end EuRoC S2M2 test.
+
 ## Adding another backend
 
-Implement `StereoMatcher::compute()` and `name()`, then register the backend in
-`createStereoMatcher()`. The virtual interface is in
+For the implementation stages and thread/geometry contracts, see
+[the Stereo code walkthrough](stereo_code_walkthrough.md).
+
+Implement `StereoMatcher::Compute()` and `name()`, then register the backend in
+`CreateStereoMatcher()`. The virtual interface is in
 `include/msckf_vio/stereo/stereo_matcher.h`. The contract is:
 
 - equally sized, rectified mono8/BGR8 inputs;
@@ -299,3 +365,18 @@ The final depth image had 97.8% valid pixels. Map save and clear passed,
 and all exported XYZ values were finite. Some input frames were dropped
 under inference load; start interactive playback at `--rate 0.2` on this GPU.
 These results check integration; they do not measure depth or pose accuracy.
+
+For S2M2 ROS integration, use the same smoke script with `--backend s2m2`
+and `--engine /absolute/path/to/s2m2_euroc.engine`. A correctly oriented
+`[1,3,480,768]` engine is required. CPU tests for S2M2 cover UINT8 RGB layout,
+centered pooled padding, strict quality thresholds, FP16 output handling,
+invalid measurements and rejection of a transposed fixed engine.
+
+Local end-to-end S2M2 verification with the corrected landscape engine on
+`V2_01_easy`, first 8 sensor seconds at 0.2 playback rate, passed: 94 depth
+frames, 141 odometry messages, 84 world point clouds and 33,009 fused map
+points. The last depth frame had 97.6% valid pixels after quality and geometry
+filtering. Save/clear passed and all exported XYZ values were finite.
+On this GTX 1650 Ti, processing was about 380 ms per frame including pose wait;
+0.2 playback dropped some input frames. Start interactive S2M2 playback at
+`--rate 0.1`. This short integration check does not measure depth accuracy.

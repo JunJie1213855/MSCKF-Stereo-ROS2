@@ -1,6 +1,6 @@
 # MSCKF VIO + 双目三维重建（ROS 2）
 
-基于 ROS 2 Humble 的双目视觉惯性里程计与点云重建系统。在 MSCKF 位姿估计的基础上，增加独立的双目重建节点，支持 **OpenCV SGBM** 和 **IGEV TensorRT** 两种视差后端，完成图像校正、深度估计和世界坐标系下的点云融合。
+基于 ROS 2 Humble 的双目视觉惯性里程计与点云重建系统。在 MSCKF 位姿估计的基础上，增加独立的双目重建节点，支持 **OpenCV SGBM**、**IGEV TensorRT** 和 **S2M2 TensorRT** 三种视差后端，完成图像校正、深度估计和世界坐标系下的点云融合。
 
 ![EuRoC 双目点云重建效果](docs/images/euroc_stereo_reconstruction.png)
 
@@ -10,11 +10,13 @@
 
 *融合点云地图的俯视效果，可观察室内墙面与场景结构。*
 
+按阶段理解实现，可阅读 [Stereo 代码阅读指南](docs/stereo_code_walkthrough.md)。
+
 ## 功能与处理流程
 
 - **双目 VIO**：跟踪双目特征，融合 IMU，输出位姿、轨迹和稀疏特征点。
 - **图像校正**：复用 MSCKF 的相机标定，支持 radtan 和 equidistant 畸变模型。
-- **视差与深度**：通过虚函数接口 `StereoMatcher` 切换 SGBM / IGEV，输出浮点像素视差和米制深度。
+- **视差与深度**：通过虚函数接口 `StereoMatcher` 切换 SGBM / IGEV / S2M2，输出浮点像素视差和米制深度。
 - **点云融合**：按图像时间戳匹配位姿，将点云变换到 VIO 世界坐标系，通过关键帧筛选和体素融合构建地图。
 - **地图管理**：RViz 显示，PCD / PLY 导出，以及清空地图服务。
 
@@ -27,14 +29,14 @@ flowchart LR
     msckf --> pose["位姿 /odom"]
 
     stereo --> rectification["图像校正"]
-    rectification --> matcher["SGBM / IGEV"]
+    rectification --> matcher["SGBM / IGEV / S2M2"]
     matcher --> depth["深度估计"]
     depth --> cloud["世界点云"]
     pose --> cloud
     cloud --> map["体素地图"]
 ```
 
-重建节点独立于 MSCKF，两个后端共享校正、位姿匹配和点云融合逻辑。当前实现为点云重建，不包含闭环优化、TSDF、网格生成或历史点云随优化位姿重新融合；地图会受到 VIO 漂移的影响。
+重建节点独立于 MSCKF，三个后端共享校正、位姿匹配和点云融合逻辑。当前实现为点云重建，不包含闭环优化、TSDF、网格生成或历史点云随优化位姿重新融合；地图会受到 VIO 漂移的影响。
 
 ## 环境与依赖
 
@@ -43,7 +45,7 @@ flowchart LR
 | 系统 | Ubuntu 22.04 / ROS 2 Humble |
 | 语言 | C++17 / Python 3.10 |
 | 基础库 | Eigen 3.4、OpenCV 4.5、PCL 1.12、Boost、SuiteSparse |
-| IGEV 可选依赖 | TensorRT 10.x、CUDA Runtime、NVIDIA GPU |
+| TensorRT 后端可选依赖 | TensorRT 10.x、CUDA Runtime、NVIDIA GPU |
 | IGEV 本地验证 | TensorRT 10.14 / CUDA 13.1 / GTX 1650 Ti |
 
 SGBM 和 VIO 无需 TensorRT / CUDA。以下命令假设仓库位于 `~/ros_ws/msckf_vio/src/msckf_vio`，工作空间根目录为 `~/ros_ws/msckf_vio`。
@@ -69,7 +71,7 @@ CMAKE_BUILD_PARALLEL_LEVEL=2 colcon build --packages-select msckf_vio \
 source install/setup.bash
 ```
 
-### 启用 IGEV TensorRT
+### 启用 IGEV / S2M2 TensorRT
 
 将 SDK 路径替换为本机安装位置。该配置同时保留 SGBM 后端。
 
@@ -86,9 +88,9 @@ CMAKE_BUILD_PARALLEL_LEVEL=2 colcon build --packages-select msckf_vio \
 source install/setup.bash
 ```
 
-模型文件需要自行准备。将转换完成的 engine 放在 `src/msckf_vio/weights/model.engine`，或在启动时指定绝对路径；权重不会随软件包安装，也不纳入 Git。
+模型文件需要自行准备。将转换完成的 engine 放在 `src/msckf_vio/weights/igev/model.engine`，或在启动时指定绝对路径；权重不会随软件包安装，也不纳入 Git。
 
-当前 engine 的接口为：
+当前 IGEV engine 的接口为：
 
 | 张量 | 类型 | 形状 |
 | --- | --- | --- |
@@ -113,7 +115,7 @@ export ROS_DOMAIN_ID=42
 
 ros2 launch msckf_vio stereo_reconstruction_euroc.launch.py \
   backend:=igev \
-  engine_path:="$(pwd)/src/msckf_vio/weights/model.engine"
+  engine_path:="$(pwd)/src/msckf_vio/weights/igev/model.engine"
 ```
 
 **SGBM：**
@@ -125,7 +127,17 @@ export ROS_DOMAIN_ID=42
 ros2 launch msckf_vio stereo_reconstruction_euroc.launch.py backend:=sgbm
 ```
 
-两种方式选择其一。如果已有 MSCKF 在运行，追加 `start_vio:=false`，并确保标定、话题、时钟和 ROS 域一致；已有 RViz 时可追加 `rviz:=false`。
+**S2M2 TensorRT：**
+
+```bash
+ros2 launch msckf_vio stereo_reconstruction_euroc.launch.py \
+  backend:=s2m2 \
+  engine_path:="$HOME/ros_ws/msckf_vio/src/msckf_vio/weights/s2m2/S2M2_S_768_480_fp16.engine"
+```
+
+S2M2 使用 RGB UINT8 输入、居中补边与置信度/可见性过滤。新导出的 `S2M2_S_768_480_fp16.engine` 实际输入为 `[1,3,480,768]`，适用于 EuRoC。请勿误用旧的 `S2M2_S_480_768_fp16.engine`，它的高宽相反；节点会在启动时检查并报错。详见 [S2M2 接口说明](docs/stereo_reconstruction.md#s2m2-tensorrt-backend)。
+
+三种方式选择其一。如果已有 MSCKF 在运行，追加 `start_vio:=false`，并确保标定、话题、时钟和 ROS 域一致；已有 RViz 时可追加 `rviz:=false`。
 
 ### 2. 播放数据
 
@@ -140,7 +152,7 @@ ros2 bag play /path/to/V2_01_easy_ros2 \
   --topics /imu0 /cam0/image_raw /cam1/image_raw
 ```
 
-重建 launch 默认启用仿真时间，因此播放时需要 `--clock`。GTX 1650 Ti 上使用 IGEV 建议从 `--rate 0.2` 开始；SGBM 可先用 `--rate 0.5`，再按实际负载调整。推理跟不上输入时，重建队列会丢弃部分帧。
+重建 launch 默认启用仿真时间，因此播放时需要 `--clock`。GTX 1650 Ti 上使用 IGEV 建议从 `--rate 0.2` 开始，S2M2 从 `--rate 0.1` 开始；SGBM 可先用 `--rate 0.5`，再按实际负载调整。推理跟不上输入时，重建队列会丢弃部分帧。
 
 MSCKF 使用最初 200 条 IMU 消息初始化重力方向和偏置，开始时传感器应保持静止。重建在初始化完成且取得匹配位姿后开始。
 
@@ -228,8 +240,9 @@ colcon test-result --verbose
 | --- | --- | --- | --- |
 | SGBM | 前 15 秒 / 0.5 倍速 | 279 | 195,987 |
 | IGEV TensorRT | 前 8 秒 / 0.25 倍速 | 122 | 41,851 |
+| S2M2 TensorRT | 前 8 秒 / 0.2 倍速 | 94 | 33,009 |
 
-两次验证均通过地图保存与清空检查。数据时长和运行负载不同，这些数字用于确认链路可运行，不用于比较后端精度或宣称实时性能。复现脚本见 [test/stereo_ros_smoke.py](test/stereo_ros_smoke.py)。
+上述验证均通过地图保存与清空检查。数据时长和运行负载不同，这些数字用于确认链路可运行，不用于比较后端精度或宣称实时性能。复现脚本见 [test/stereo_ros_smoke.py](test/stereo_ros_smoke.py)。
 
 ## 常见问题
 
