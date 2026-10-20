@@ -1,4 +1,4 @@
-"""EuRoC + MSCKF + SGBM dense point-cloud fusion.
+"""EuRoC + MSCKF + selectable stereo dense point-cloud fusion.
 
 Set start_vio:=false to attach to an already running MSCKF pipeline.
 Camera calibration and body/world frame names come from the VIO parameter
@@ -34,6 +34,13 @@ def launch_nodes(context):
         'pose_child_frame_id': vio['child_frame_id'],
     })
     clock = {'use_sim_time': ParameterValue(LaunchConfiguration('use_sim_time'), value_type=bool)}
+    matcher_overrides = {}
+    backend = LaunchConfiguration('backend').perform(context)
+    engine_path = LaunchConfiguration('engine_path').perform(context)
+    if backend:
+        matcher_overrides['backend'] = backend
+    if engine_path:
+        matcher_overrides['igev.engine_path'] = engine_path
     vio_nodes = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(PathJoinSubstitution([
             pkg_share, 'launch', 'msckf_vio_euroc.launch.py'])),
@@ -48,7 +55,7 @@ def launch_nodes(context):
     reconstruction = Node(
         package='msckf_vio', executable='stereo_reconstruction_node',
         name='stereo_reconstruction', output='screen',
-        parameters=[reconstruction_path, calibration, clock],
+        parameters=[reconstruction_path, calibration, clock, matcher_overrides],
         remappings=[('cam0_image', LaunchConfiguration('cam0_topic')),
                     ('cam1_image', LaunchConfiguration('cam1_topic')),
                     ('odom', LaunchConfiguration('odom_topic'))])
@@ -69,6 +76,10 @@ def generate_launch_description():
                               description='Start MSCKF and its image processor.'),
         DeclareLaunchArgument('rviz', default_value='true'),
         DeclareLaunchArgument('use_sim_time', default_value='true'),
+        DeclareLaunchArgument('backend', default_value='',
+                              description='Override the YAML backend: sgbm or igev.'),
+        DeclareLaunchArgument('engine_path', default_value='',
+                              description='Override igev.engine_path with an absolute TensorRT engine path.'),
         DeclareLaunchArgument('imu_topic', default_value='/imu0'),
         DeclareLaunchArgument('cam0_topic', default_value='/cam0/image_raw'),
         DeclareLaunchArgument('cam1_topic', default_value='/cam1/image_raw'),

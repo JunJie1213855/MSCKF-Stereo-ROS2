@@ -39,7 +39,34 @@ class SgbmMatcher final : public StereoMatcher {
   cv::Ptr<cv::StereoSGBM> matcher_;
 };
 
+struct IgevParameters {
+  std::string engine_path;
+  std::string left_input_name = "left";
+  std::string right_input_name = "right";
+  std::string output_name = "disparity";
+  // Zero uses the static engine dimension, or pads the image to a multiple
+  // of padding_multiple for a dynamic dimension. No image resizing is done.
+  int input_width = 0;
+  int input_height = 0;
+  int padding_multiple = 32;
+  std::string padding_mode = "right_bottom";
+  int device_id = 0;
+};
+
+class IgevMatcher final : public StereoMatcher {
+ public:
+  explicit IgevMatcher(const IgevParameters& parameters);
+  ~IgevMatcher() override;
+  cv::Mat compute(const cv::Mat& left, const cv::Mat& right) override;
+  std::string name() const override { return "igev"; }
+
+ private:
+  class Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
 std::unique_ptr<StereoMatcher> createStereoMatcher(
-    const std::string& backend, const SgbmParameters& parameters);
+    const std::string& backend, const SgbmParameters& parameters,
+    const IgevParameters& igev_parameters = IgevParameters{});
 
 }  // namespace msckf_vio::stereo

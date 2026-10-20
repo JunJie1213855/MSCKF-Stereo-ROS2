@@ -1,8 +1,8 @@
 # EuRoC + MSCKF stereo point-cloud fusion
 
 The `stereo_reconstruction_node` runs independently of the MSCKF estimator. Its
-first backend is OpenCV SGBM, with a virtual `StereoMatcher` interface for later
-TensorRT implementations. The added node needs no CUDA, TensorRT or PCL APIs;
+backends are OpenCV SGBM and IGEV on TensorRT 10.x, sharing the virtual
+`StereoMatcher` interface. The default SGBM-only build needs no CUDA/TensorRT;
 the existing package dependencies still apply.
 
 ## Build and run
@@ -154,12 +154,85 @@ existing voxels continue updating and unseen voxels are skipped with a warning.
 Most parameters are read once at startup; restart to apply geometry/matcher
 changes. Only `save_map_path` is read again on each save request.
 
-This is a point-cloud reconstruction baseline with SGBM speckle/uniqueness and
-depth filtering. It has no TSDF, surface meshing, loop closure, dynamic-object
+This is a point-cloud reconstruction baseline with depth filtering and,
+for the SGBM backend, speckle/uniqueness filtering. It has no TSDF, surface meshing, loop closure, dynamic-object
 removal or pose-graph reintegration. The map inherits VIO drift and any change
 in camera/IMU extrinsics estimated online; reconstruction uses startup extrinsics.
 
-## Adding a TensorRT backend
+## IGEV TensorRT backend
+
+Enable TensorRT explicitly when building (the default is OFF):
+
+```bash
+colcon build --packages-select msckf_vio --cmake-args \
+  -DMSCKF_ENABLE_TENSORRT=ON \
+  -DTensorRT_ROOT=/home/ros/lib/TensorRT-10.14 \
+  -DCUDA_ROOT=/usr/local/cuda-13.1
+source install/setup.bash
+```
+
+Use the SDK roots for the target machine. No `nvcc` compilation is required;
+the backend uses the TensorRT/CUDA C++ runtime APIs. To return to a CPU-only
+build, set `-DMSCKF_ENABLE_TENSORRT=OFF` explicitly in an existing build tree.
+The node reports startup failure with a nonzero exit status when IGEV was not
+built, the engine is absent/empty/incompatible, or tensor names do not match.
+It does not fall back silently to SGBM.
+
+After engine conversion has completed:
+
+```bash
+ros2 launch msckf_vio stereo_reconstruction_euroc.launch.py \
+  backend:=igev \
+  engine_path:=/home/ros/ros_ws/msckf_vio/src/msckf_vio/weights/model.engine
+```
+
+Add `start_vio:=false` to attach to an existing MSCKF run. All topics and map
+services stay the same. The original launch without overrides selects the
+backend in the YAML, which defaults to SGBM. Engine files are used in place;
+model weights are not copied into the package installation or modified.
+
+The supplied `weights/igev_480_752.onnx` was inspected: its actual input names
+and shapes are `left` and `right`, both `[1,3,480,768]` FP32, and its output is
+`disparity`, `[1,1,480,768]` FP32. The width in the filename is not the engine
+input width. For EuRoC, the backend pads 752 columns to 768, then crops the
+output back to 752 without scaling the pixel disparity.
+
+The preprocessing contract is RGB FP32 NCHW with values in `[0,255]`; the
+exported graph already contains normalization. Monochrome input is replicated
+into three channels. TensorRT FP32 and FP16 I/O are supported and the restored
+disparity is always `CV_32FC1`. No `/16` conversion is applied to IGEV output.
+
+The `igev` section of the reconstruction YAML provides:
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `engine_path` | empty | Absolute path to a completed TensorRT engine |
+| `left_input_name` / `right_input_name` | `left` / `right` | Exact engine input names |
+| `output_name` | `disparity` | Exact final disparity output name |
+| `input_width` / `input_height` | 0 / 0 | Infer static dimensions from the engine |
+| `padding_multiple` | 32 | Auto-padding multiple for dynamic dimensions |
+| `padding_mode` | `right_bottom` | Match the existing thirdparty IGEV example |
+| `device_id` | 0 | CUDA GPU index |
+
+`right_bottom` pads the bottom/right with zeros. `sintel` uses centered
+replicated-edge padding, matching the original IGEV `InputPadder` convention.
+Choose the same convention as the reference preprocessing used to validate
+the exported model. Both cameras use identical offsets. Larger images than a
+fixed engine accepts are rejected; no implicit resize/crop changes calibration.
+For dynamic engines, profile 0 is used and input sizes must fit its bounds.
+
+The final output must be full-resolution `[H,W]`, `[1,H,W]` or `[1,1,H,W]`
+disparity in network-input pixels. Low-resolution predictions are rejected,
+because their disparity units cannot safely be inferred from tensor dimensions.
+Nonpositive or nonfinite disparities become NaN before depth reconstruction.
+
+The runtime owns one CUDA stream/context and reuses device/host I/O buffers.
+It selects the device on the ROS worker thread and checks transfer, enqueue
+and synchronization errors. Extra engine outputs receive bindings; the named
+final disparity output is the one downloaded. Rectification, timestamp pose
+matching, keyframe selection and voxel fusion are shared with SGBM.
+
+## Adding another backend
 
 Implement `StereoMatcher::compute()` and `name()`, then register the backend in
 `createStereoMatcher()`. The virtual interface is in
@@ -172,8 +245,7 @@ Implement `StereoMatcher::compute()` and `name()`, then register the backend in
 
 The backend owns normalization, color conversion, padding, output dtype/layout,
 and scaling disparity values when restoring resolution. Rectification, pose
-matching and fusion stay shared. No TensorRT backend is implemented in this
-SGBM baseline.
+matching and fusion stay shared.
 
 ## Verification
 
@@ -186,6 +258,10 @@ colcon test-result --verbose
 The added core tests cover known-shift SGBM pixel scale, metric depth, invalid
 correspondences, inverse rectification rotation, transform layout validation,
 timestamp pose selection, keyframe thresholds, bounded voxel fusion and export.
+IGEV CPU tests additionally cover RGB/NCHW layout, normalization range,
+monochrome input, padding offsets, FP16 conversion, pixel-disparity preservation,
+invalid output handling and missing-engine/disabled-build errors. They do not
+require a GPU or a completed engine; GPU numerical validation is a separate check.
 
 For a manual ROS integration check, source the built workspace and run:
 
@@ -206,3 +282,20 @@ and 195,987 fused map points. The final depth image had 76.1% valid pixels.
 PCD save and map clear passed, and the exported XYZ/RGB values were finite.
 This is an integration check on a short sequence, not an accuracy benchmark or
 a claim of full-rate real-time performance.
+
+The same integration check supports a completed IGEV engine:
+
+```bash
+python3 src/msckf_vio/test/stereo_ros_smoke.py /path/to/V2_01_easy_ros2 \
+  --duration 8 --rate 0.25 --domain-id 94 --backend igev \
+  --engine /absolute/path/to/model.engine \
+  --output /tmp/msckf_igev_euroc_validation
+```
+
+Local IGEV verification with `weights/model.engine` on a GTX 1650 Ti, first
+8 sensor seconds of `V2_01_easy` at 0.25 playback rate: 122 depth images,
+141 odometry messages, 112 world point clouds and 41,851 fused map points.
+The final depth image had 97.8% valid pixels. Map save and clear passed,
+and all exported XYZ values were finite. Some input frames were dropped
+under inference load; start interactive playback at `--rate 0.2` on this GPU.
+These results check integration; they do not measure depth or pose accuracy.

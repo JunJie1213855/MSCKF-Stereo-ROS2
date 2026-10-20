@@ -26,10 +26,14 @@ def main():
     parser.add_argument('--duration', type=float, default=15.0, help='Sensor seconds to replay')
     parser.add_argument('--rate', type=float, default=0.5)
     parser.add_argument('--domain-id', type=int, default=91)
+    parser.add_argument('--backend', choices=['sgbm', 'igev'], default='sgbm')
+    parser.add_argument('--engine', type=Path, help='Completed TensorRT engine for --backend igev')
     parser.add_argument('--output', type=Path, default=Path('/tmp/msckf_stereo_euroc_validation'))
     args = parser.parse_args()
     if args.duration <= 2 or args.rate <= 0 or not 0 <= args.domain_id <= 232:
         parser.error('Use duration > 2, positive rate and a domain ID in [0,232]')
+    if args.backend == 'igev' and (not args.engine or not args.engine.is_file() or args.engine.stat().st_size == 0):
+        parser.error('--backend igev requires a nonempty --engine file')
     args.output.mkdir(parents=True, exist_ok=True)
     os.environ['ROS_DOMAIN_ID'] = str(args.domain_id)
     os.environ['ROS_LOCALHOST_ONLY'] = '1'
@@ -47,6 +51,9 @@ def main():
 
     share = Path(get_package_share_directory('msckf_vio'))
     config = yaml.safe_load((share / 'config/stereo_reconstruction_euroc_params.yaml').read_text())
+    config['stereo_reconstruction']['ros__parameters']['backend'] = args.backend
+    if args.engine:
+        config['stereo_reconstruction']['ros__parameters']['igev']['engine_path'] = str(args.engine.resolve())
     output_map = args.output / 'stereo_map.pcd'
     config['stereo_reconstruction']['ros__parameters']['save_map_path'] = str(output_map)
     parameter_path = args.output / 'parameters.yaml'
@@ -60,7 +67,7 @@ def main():
     executor = None
     thread = None
     connection = None
-    metrics = {'depth_frames': 0, 'odom_frames': 0, 'map_updates': 0,
+    metrics = {'backend': args.backend, 'depth_frames': 0, 'odom_frames': 0, 'map_updates': 0,
                'max_map_points': 0, 'last_map_points': 0, 'world_clouds': 0,
                'last_depth_valid_fraction': 0.0}
     validation_errors = []
@@ -209,7 +216,9 @@ def main():
         if rclpy.ok():
             rclpy.shutdown()
         if process.poll() is None:
-            os.killpg(process.pid, signal.SIGINT)
+            # Let launch forward SIGINT once to its children; signaling the
+            # whole group would also deliver a second SIGINT via launch.
+            process.send_signal(signal.SIGINT)
             try:
                 process.wait(timeout=10)
             except subprocess.TimeoutExpired:

@@ -52,9 +52,11 @@ cv::Mat SgbmMatcher::compute(const cv::Mat& left, const cv::Mat& right) {
 }
 
 std::unique_ptr<StereoMatcher> createStereoMatcher(
-    const std::string& backend, const SgbmParameters& parameters) {
+    const std::string& backend, const SgbmParameters& parameters,
+    const IgevParameters& igev_parameters) {
   if (backend == "sgbm") return std::make_unique<SgbmMatcher>(parameters);
+  if (backend == "igev") return std::make_unique<IgevMatcher>(igev_parameters);
   throw std::invalid_argument("Unsupported stereo backend '" + backend +
-                              "'; available backend: sgbm");
+                              "'; available backends: sgbm, igev");
 }
 }  // namespace msckf_vio::stereo

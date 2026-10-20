@@ -117,10 +117,10 @@ target_link_libraries(msckf_vio_node msckf_vio_lib)
 add_executable(image_processor_node src/image_processor_node.cpp)
 target_link_libraries(image_processor_node image_processor)
 
-# Dense stereo has no CUDA/TensorRT/PCL requirement. Add future matcher
-# implementations behind the StereoMatcher virtual interface.
+# SGBM and IGEV image processing are CPU-only; the TensorRT runtime is optional.
 add_library(stereo_reconstruction_lib
   src/stereo/stereo_matcher.cpp
+  src/stereo/igev_processing.cpp
   src/stereo/reconstruction.cpp
 )
 target_include_directories(stereo_reconstruction_lib PUBLIC
@@ -128,13 +128,14 @@ target_include_directories(stereo_reconstruction_lib PUBLIC
   $<INSTALL_INTERFACE:include>
   ${OpenCV_INCLUDE_DIRS}
 )
-target_link_libraries(stereo_reconstruction_lib Eigen3::Eigen ${OpenCV_LIBS})
+target_link_libraries(stereo_reconstruction_lib PUBLIC Eigen3::Eigen ${OpenCV_LIBS})
 
 add_executable(stereo_reconstruction_node src/stereo_reconstruction_node.cpp)
 ament_target_dependencies(stereo_reconstruction_node
   rclcpp std_msgs sensor_msgs nav_msgs geometry_msgs std_srvs
   tf2_ros cv_bridge message_filters)
 target_link_libraries(stereo_reconstruction_node stereo_reconstruction_lib Threads::Threads)
+include(cmake/TensorRTBackend.cmake)
 
 #############
 ## Install ##
@@ -179,6 +180,9 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_stereo_reconstruction test/stereo_reconstruction_test.cpp)
   target_link_libraries(test_stereo_reconstruction stereo_reconstruction_lib)
+
+  ament_add_gtest(test_igev_processing test/igev_processing_test.cpp)
+  target_link_libraries(test_igev_processing stereo_reconstruction_lib)
 endif()
 
 ament_package()

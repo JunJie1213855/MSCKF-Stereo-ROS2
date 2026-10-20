@@ -4,10 +4,10 @@ The `MSCKF_VIO` package is a stereo version of MSCKF. The software takes in sync
 
 This is a ROS 2 (Humble) port of the original ROS 1 package; the estimator itself is unchanged.
 
-An independent SGBM stereo reconstruction node can rectify EuRoC images and
-fuse dense point clouds using the MSCKF poses. See
+An independent stereo reconstruction node supports SGBM and an optional IGEV
+TensorRT backend to rectify EuRoC images and fuse dense point clouds using the MSCKF poses. See
 [stereo reconstruction](docs/stereo_reconstruction.md) for launching, parameters,
-map export and the virtual matcher interface for future TensorRT backends.
+map export, IGEV setup and the virtual matcher interface.
 
 Video: [https://www.youtube.com/watch?v=jxfJFgzmNSw&t](https://www.youtube.com/watch?v=jxfJFgzmNSw&t=3s)<br/>
 Paper Draft: [https://arxiv.org/abs/1712.00036](https://arxiv.org/abs/1712.00036)

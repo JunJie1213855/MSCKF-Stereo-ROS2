@@ -79,7 +79,17 @@ class ReconstructionNode final : public rclcpp::Node {
     p.speckle_range = declare_parameter<int>("sgbm.speckle_range", p.speckle_range);
     p.disp12_max_diff = declare_parameter<int>("sgbm.disp12_max_diff", p.disp12_max_diff);
     p.pre_filter_cap = declare_parameter<int>("sgbm.pre_filter_cap", p.pre_filter_cap);
-    matcher_ = createStereoMatcher(declare_parameter<std::string>("backend", "sgbm"), p);
+    IgevParameters igev;
+    igev.engine_path = declare_parameter<std::string>("igev.engine_path", "");
+    igev.left_input_name = declare_parameter<std::string>("igev.left_input_name", igev.left_input_name);
+    igev.right_input_name = declare_parameter<std::string>("igev.right_input_name", igev.right_input_name);
+    igev.output_name = declare_parameter<std::string>("igev.output_name", igev.output_name);
+    igev.input_width = declare_parameter<int>("igev.input_width", igev.input_width);
+    igev.input_height = declare_parameter<int>("igev.input_height", igev.input_height);
+    igev.padding_multiple = declare_parameter<int>("igev.padding_multiple", igev.padding_multiple);
+    igev.padding_mode = declare_parameter<std::string>("igev.padding_mode", igev.padding_mode);
+    igev.device_id = declare_parameter<int>("igev.device_id", igev.device_id);
+    matcher_ = createStereoMatcher(declare_parameter<std::string>("backend", "sgbm"), p, igev);
     // Bound OpenCV's CPU pool so dense stereo leaves CPU time for VIO.
     cv::setNumThreads(positive_int("opencv_threads", 2));
 
