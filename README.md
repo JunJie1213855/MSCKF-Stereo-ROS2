@@ -18,11 +18,20 @@
 - **点云融合**：按图像时间戳匹配位姿，将点云变换到 VIO 世界坐标系，通过关键帧筛选和体素融合构建地图。
 - **地图管理**：RViz 显示，PCD / PLY 导出，以及清空地图服务。
 
-```text
-双目图像 ──→ 特征跟踪 ──┐
-IMU ──────────────────┴──→ MSCKF ──→ 位姿 /odom
-                                             │
-双目图像 ──→ 校正 ──→ SGBM / IGEV ──→ 深度 ──┴──→ 世界点云 ──→ 体素地图
+```mermaid
+flowchart LR
+    stereo["双目图像"] --> tracking["特征跟踪"]
+    imu["IMU"] --> tracking
+    tracking --> msckf["MSCKF"]
+    imu --> msckf
+    msckf --> pose["位姿 /odom"]
+
+    stereo --> rectification["图像校正"]
+    rectification --> matcher["SGBM / IGEV"]
+    matcher --> depth["深度估计"]
+    depth --> cloud["世界点云"]
+    pose --> cloud
+    cloud --> map["体素地图"]
 ```
 
 重建节点独立于 MSCKF，两个后端共享校正、位姿匹配和点云融合逻辑。当前实现为点云重建，不包含闭环优化、TSDF、网格生成或历史点云随优化位姿重新融合；地图会受到 VIO 漂移的影响。
