@@ -1,6 +1,6 @@
 # MSCKF VIO + 双目三维重建（ROS 2）
 
-基于 ROS 2 Humble 的双目视觉惯性里程计与点云重建系统。在 MSCKF 位姿估计的基础上，增加独立的双目重建节点，支持 **OpenCV SGBM**、**IGEV TensorRT** 和 **S2M2 TensorRT** 三种视差后端，完成图像校正、深度估计和世界坐标系下的点云融合。
+基于 ROS 2 Humble 的双目视觉惯性里程计与点云重建系统。在 MSCKF 位姿估计的基础上，增加独立的双目重建节点，支持 **OpenCV SGBM**、**IGEV TensorRT** 和 **S2M2 TensorRT** 三种视差后端，完成图像校正、深度估计和世界坐标系下的点云融合。同时支持 **VIO 轨迹发布、按时间同步的真值对比，以及 evo 离线误差评估与绘图**。
 
 ![EuRoC 双目点云重建效果](docs/images/euroc_stereo_reconstruction.png)
 
@@ -15,6 +15,9 @@
 ## 功能与处理流程
 
 - **双目 VIO**：跟踪双目特征，融合 IMU，输出位姿、轨迹和稀疏特征点。
+- **轨迹发布**：通过 `/path` 发布完整的 `nav_msgs/Path`，支持后加入的订阅者获取已有轨迹。
+- **真值同步对比**：通过 launch 参数 `ground_truth:=...` 加载 EuRoC CSV / TUM 真值，按估计时间戳插值，在 RViz 叠加轨迹并发布位置、姿态误差及累计位置 RMSE。
+- **离线评估与绘图**：导出 TUM 轨迹，用 evo 计算 APE / RPE、保存三维轨迹和误差图；项目脚本处理 Matplotlib 混用与无图形界面导出问题。
 - **图像校正**：复用 MSCKF 的相机标定，支持 radtan 和 equidistant 畸变模型。
 - **视差与深度**：通过虚函数接口 `StereoMatcher` 切换 SGBM / IGEV / S2M2，输出浮点像素视差和米制深度。
 - **点云融合**：按图像时间戳匹配位姿，将点云变换到 VIO 世界坐标系，通过关键帧筛选和体素融合构建地图。
@@ -27,6 +30,11 @@ flowchart LR
     tracking --> msckf["MSCKF"]
     imu --> msckf
     msckf --> pose["位姿 /odom"]
+    pose --> path["估计轨迹 /path"]
+    truth["EuRoC CSV / TUM 真值"] --> comparison["时间插值 + 固定首帧对齐"]
+    pose --> comparison
+    comparison --> gt_path["真值轨迹 /ground_truth/path"]
+    comparison --> error["位置 / 姿态误差与 RMSE"]
 
     stereo --> rectification["图像校正"]
     rectification --> matcher["SGBM / IGEV / S2M2"]
@@ -45,6 +53,8 @@ flowchart LR
 | 系统 | Ubuntu 22.04 / ROS 2 Humble |
 | 语言 | C++17 / Python 3.10 |
 | 基础库 | Eigen 3.4、OpenCV 4.5、PCL 1.12、Boost、SuiteSparse |
+| 真值对比 | rclpy、NumPy、PyYAML，由 ROS 包依赖声明 |
+| 离线评估可选依赖 | evo、Matplotlib |
 | TensorRT 后端可选依赖 | TensorRT 10.x、CUDA Runtime、NVIDIA GPU |
 | IGEV 本地验证 | TensorRT 10.14 / CUDA 13.1 / GTX 1650 Ti |
 
@@ -183,6 +193,7 @@ ros2 service call /stereo/clear_map std_srvs/srv/Trigger '{}'
 | `/imu0` | IMU 输入，`sensor_msgs/Imu` |
 | `/cam0/image_raw`、`/cam1/image_raw` | 同步双目输入，`sensor_msgs/Image` |
 | `/odom` | MSCKF 位姿，`nav_msgs/Odometry` |
+| `/path` | MSCKF 累积轨迹，`nav_msgs/Path`，坐标系与 `/odom` 一致 |
 | `/stereo/left/image_rect`、`/stereo/right/image_rect` | 校正后的双目图像 |
 | `/stereo/disparity` | `32FC1` 像素视差，无效值为 NaN |
 | `/stereo/depth` | `32FC1` 深度，单位米，无效值为 NaN |
@@ -191,6 +202,8 @@ ros2 service call /stereo/clear_map std_srvs/srv/Trigger '{}'
 | `/stereo/map` | 融合后的体素点云地图，VIO 世界坐标系 |
 
 图像与单帧点云按订阅需求生成，使用 best-effort QoS；地图使用 reliable / transient-local QoS，可供新订阅者获取最近一次地图。
+
+`/path` 随每次里程计输出更新，使用 reliable / transient-local QoS，后加入的订阅者可获取已有轨迹。手动调用 `/reset` 时清空轨迹；仅重置协方差的在线重置保留轨迹。轨迹保存本次运行的全部已发布位姿，历史位姿不会随滤波更新重新优化。
 
 | 文件 | 用途 |
 | --- | --- |
@@ -202,7 +215,9 @@ ros2 service call /stereo/clear_map std_srvs/srv/Trigger '{}'
 
 重建 launch 从 VIO 参数文件读取同一份几何标定。双目图像必须时间戳一致，输入尺寸必须匹配标定；换相机时需要更新内参、畸变、双目外参和 IMU 外参。矩阵参数使用 16 个按行排列的浮点数，避免混用 `0` 和 `0.0`。
 
-## 单独运行 VIO 与轨迹评估
+## VIO 轨迹发布、真值对比与评估
+
+### 发布与显示 VIO 轨迹
 
 不需要稠密重建时，可单独启动 MSCKF：
 
@@ -210,18 +225,187 @@ ros2 service call /stereo/clear_map std_srvs/srv/Trigger '{}'
 ros2 launch msckf_vio msckf_vio_euroc.launch.py use_sim_time:=true
 ```
 
-同样使用 `--clock` 播放数据。其他入口包括 EuRoC 在线外参估计配置 `msckf_vio_euroc_noextrinsics.launch.py` 和 UPenn fast flight 配置 `msckf_vio_fla.launch.py`。
-
-`scripts/` 提供轨迹记录、EuRoC 真值转换和 evo 辅助脚本：
+需要 RViz 时改用：
 
 ```bash
-python3 src/msckf_vio/scripts/record_odom.py /tmp/est.txt
-python3 src/msckf_vio/scripts/gt_asl_to_tum.py \
-  /path/to/sequence/mav0/state_groundtruth_estimate0/data.csv /tmp/gt.txt
+ros2 launch msckf_vio msckf_vio_euroc_viz.launch.py use_sim_time:=true
+```
 
-# 需另行安装 evo；VIO 使用 SE(3) 对齐评估米制轨迹
-# 轨迹记录完成后执行
-evo_ape tum /tmp/gt.txt /tmp/est.txt -a
+EuRoC VIO 和双目重建的 RViz 配置均已添加绿色 **VIO Path**，订阅 `/path`。
+自行配置 RViz 时，添加 `Path` 显示，话题选择 `/path`，Fixed Frame 与 `/odom` 的
+`header.frame_id` 一致（默认 `world`），Durability 选择 `Transient Local`、
+Reliability 选择 `Reliable`，Buffer Length 设为 1。
+
+轨迹与 `/odom` 使用相同的机体位姿、采集时间戳和世界坐标系，每次里程计输出追加一个点，
+并发布完整历史。手动 `/reset` 或轨迹时间倒退时清空；仅重置协方差的在线重置保留轨迹。
+
+同样使用 `--clock` 播放数据。其他入口包括 EuRoC 在线外参估计配置 `msckf_vio_euroc_noextrinsics.launch.py` 和 UPenn fast flight 配置 `msckf_vio_fla.launch.py`。
+
+### 按时间同步显示真值与估计轨迹
+
+在 launch 中指定 `ground_truth`，即可加载同一序列的 EuRoC
+`mav0/state_groundtruth_estimate0/data.csv` 或 TUM 格式文本。以下以 **V2_03_difficult**
+为例，将 `/path/to` 替换为实际目录；launch 参数使用 `:=`：
+
+```bash
+source /home/ros/ros_ws/msckf_vio/install/setup.bash
+ros2 launch msckf_vio msckf_vio_euroc_viz.launch.py \
+  use_sim_time:=true \
+  ground_truth:=/path/to/V2_03_difficult/mav0/state_groundtruth_estimate0/data.csv
+```
+
+另一个终端播放对应 bag：
+
+```bash
+source /home/ros/ros_ws/msckf_vio/install/setup.bash
+ros2 bag play /path/to/V2_03_difficult/V2_03_difficult --clock --rate 0.5 \
+  --topics /imu0 /cam0/image_raw /cam1/image_raw
+```
+
+两个终端使用相同的 `ROS_DOMAIN_ID`。bag 与真值必须来自同一序列，例如不能播放
+`V2_02_medium` 却加载 `V2_03_difficult` 的真值。切换序列前停止并重新启动 VIO。
+
+RViz 中绿色 **VIO Path**（`/path`）为估计轨迹，红色 **Ground Truth Path**
+（`/ground_truth/path`）为真值。
+真值由 `/odom` 的消息时间戳驱动，位置线性插值、姿态 SLERP；暂停和变速播放不会
+改变时间关联，不会提前显示整条真值轨迹。超出真值范围或跨越超过 50 ms 的缺口时
+跳过匹配，不进行外推。`use_sim_time` 同时传给 VIO、对比节点和 RViz。
+
+首组成功匹配的完整位姿确定固定的 SE(3) 对齐变换，此后不再拟合，也不调整尺度。
+真值须描述 IMU 状态；节点使用 VIO 参数文件中的 `T_imu_body` 转换到同一个机体原点。
+TUM 文件同样须使用 IMU 位姿、秒制采集时间戳和 `qx qy qz qw` 四元数顺序。
+这是首帧对齐的在线对比，RMSE 与 evo 全轨迹最佳拟合后的 APE 不同。
+
+| 话题 | 类型 / 含义 |
+| --- | --- |
+| `/ground_truth/path` | `nav_msgs/Path`，同步累积的真值轨迹，支持后加入的订阅者 |
+| `/ground_truth/pose` | `geometry_msgs/PoseStamped`，时间戳和世界坐标系与当前估计相同 |
+| `/ground_truth/position_error` | `std_msgs/Float64`，当前匹配位置误差，米 |
+| `/ground_truth/orientation_error_deg` | `std_msgs/Float64`，当前姿态误差，度 |
+| `/ground_truth/position_rmse` | `std_msgs/Float64`，本段首帧对齐后的累计位置 RMSE，米 |
+
+对比节点每隔约 5 秒打印一次误差。手动 `/reset` 清空 VIO 轨迹时，同时清空真值轨迹、
+对齐变换和统计；时间倒退也会清空对比状态，重新从头播放时仍需重新启动或重置 VIO。
+仅重置协方差的在线重置不改变对齐。
+
+也可以直接查看数值：
+
+```bash
+ros2 topic echo /ground_truth/position_error
+ros2 topic echo /ground_truth/position_rmse
+```
+
+以上命令分别在终端运行，单位均为米。各 launch 的支持情况如下：
+
+| launch | 行为 |
+| --- | --- |
+| `msckf_vio_euroc.launch.py` | VIO，可选加载真值 |
+| `msckf_vio_euroc_viz.launch.py` | VIO + RViz，可选同步显示真值 |
+| `stereo_reconstruction_euroc.launch.py` | VIO + 双目重建 + RViz，可选加载真值；`start_vio:=false` 时也可挂接已有 VIO |
+| `ground_truth.launch.py` | 单独运行真值对比节点 |
+
+前三种 launch 不传 `ground_truth` 时不会启动对比节点。已有 VIO 时，可单独启动：
+
+```bash
+ros2 launch msckf_vio ground_truth.launch.py \
+  ground_truth:=/path/to/sequence/mav0/state_groundtruth_estimate0/data.csv \
+  use_sim_time:=true
+```
+
+单独启动时用 `vio_params_file` 指定已有 VIO 使用的参数文件，`odom_topic` 和
+`path_topic` 可覆盖估计话题。
+
+### 离线轨迹评估
+
+离线评估使用同一次运行的 `/odom` 和同一序列真值。本节命令从工作空间根目录
+`~/ros_ws/msckf_vio` 执行，evo 需要另行安装。
+
+**1. 记录估计轨迹。** 先启动 VIO 和录制器，再播放 bag；播放结束后，在录制器终端
+按 Ctrl-C 保存并退出。录制器与 VIO 使用相同的 `ROS_DOMAIN_ID`。
+
+```bash
+cd ~/ros_ws/msckf_vio
+source install/setup.bash
+mkdir -p /tmp/vio_eval
+
+python3 src/msckf_vio/scripts/record_odom.py /tmp/vio_eval/est.txt
+```
+
+**2. 转换同一序列的真值。**
+
+```bash
+python3 src/msckf_vio/scripts/gt_asl_to_tum.py \
+  /path/to/V2_03_difficult/mav0/state_groundtruth_estimate0/data.csv \
+  /tmp/vio_eval/gt.txt
+```
+
+估计和转换后的真值均为 TUM 格式，每行是：
+
+```text
+timestamp[s] x y z qx qy qz qw
+```
+
+时间戳保留传感器采集时间，不能替换为电脑当前时间。每次独立运行单独录制文件，
+手动重置或切换数据集后重新录制。
+
+**3. 计算 APE 并保存误差图。** 推荐使用项目的 `evo_run.py`，参数与 evo 相同，
+将命令名 `evo_ape` 改为 `python3 .../evo_run.py ape`：
+
+```bash
+python3 src/msckf_vio/scripts/evo_run.py ape tum \
+  /tmp/vio_eval/gt.txt /tmp/vio_eval/est.txt \
+  --align --pose_relation trans_part --t_max_diff 0.01 \
+  --save_results /tmp/vio_eval/ape.zip \
+  --save_plot /tmp/vio_eval/ape.png
+```
+
+`--align` 仅做 SE(3) 旋转和平移对齐，`--t_max_diff 0.01` 允许最多 10 ms 的时间关联差。
+双目 VIO 已有米制尺度，常规评估保留尺度误差，不添加 `--correct_scale`。
+位置 APE 的 `rmse`、`mean`、`median`、`max` 均以米为单位。evo 根据整个匹配片段
+做最佳拟合，因而与在线固定首帧对齐的 `/ground_truth/position_rmse` 不同。
+
+**4. 保存三维轨迹叠加图。**
+
+```bash
+python3 src/msckf_vio/scripts/evo_run.py traj tum /tmp/vio_eval/est.txt \
+  --ref /tmp/vio_eval/gt.txt --align --sync --t_max_diff 0.01 \
+  --plot_mode xyz --save_plot /tmp/vio_eval/trajectory.png
+```
+
+需要俯视图时，将 `--plot_mode xyz` 改为 `--plot_mode xy`。
+
+**5. 可选：计算局部漂移 RPE。** 以下比较沿真值轨迹每约 1 米路段的相对平移误差：
+
+```bash
+python3 src/msckf_vio/scripts/evo_run.py rpe tum \
+  /tmp/vio_eval/gt.txt /tmp/vio_eval/est.txt \
+  --pose_relation trans_part --delta 1 --delta_unit m --pairs_from_reference \
+  --t_max_diff 0.01 --save_results /tmp/vio_eval/rpe.zip \
+  --save_plot /tmp/vio_eval/rpe.png
+```
+
+输出文件包括：
+
+| 文件 | 内容 |
+| --- | --- |
+| `/tmp/vio_eval/est.txt`、`gt.txt` | 估计与真值 TUM 轨迹 |
+| `/tmp/vio_eval/ape.zip` | APE 统计与误差结果 |
+| `/tmp/vio_eval/ape_raw.png` | 位置误差随时间变化 |
+| `/tmp/vio_eval/ape_map.png` | 按位置误差着色的轨迹 |
+| `/tmp/vio_eval/trajectory_trajectories.png` | 估计与真值轨迹叠加 |
+| `/tmp/vio_eval/trajectory_xyz.png`、`trajectory_rpy.png`、`trajectory_speeds.png` | 位置、姿态及速度曲线 |
+| `/tmp/vio_eval/rpe.zip`、`rpe_raw.png`、`rpe_map.png` | 可选的局部漂移结果与图像 |
+
+导出图片默认使用 Agg 后端，无需图形界面；脚本让 `mpl_toolkits` 与实际导入的
+Matplotlib 来自同一安装位置，并在当前进程中应用绘图后端，不修改全局 evo 配置。
+若显式设置 `MPLBACKEND`，脚本优先采用该值，例如 `MPLBACKEND=Agg python3 ...`。
+
+需要弹窗交互时，在有图形界面且 Qt / Tk 可用的桌面终端执行：
+
+```bash
+python3 src/msckf_vio/scripts/evo_run.py ape tum \
+  /tmp/vio_eval/gt.txt /tmp/vio_eval/est.txt \
+  --align --pose_relation trans_part --t_max_diff 0.01 --plot
 ```
 
 ## 验证
@@ -233,6 +417,11 @@ colcon test-result --verbose
 ```
 
 测试覆盖 SGBM 视差尺度、深度与坐标变换、位姿匹配、体素融合、地图导出，以及 IGEV 的输入布局、补边、FP16 转换和无效输出处理。
+
+真值对比测试见 [test/test_ground_truth.py](test/test_ground_truth.py)，覆盖 EuRoC / TUM
+解析、纳秒时间戳、位置与姿态插值、禁止外推、数据缺口、机体外参、固定对齐、误差统计、
+重置和时间倒退。另已通过独立 ROS 域的 launch 冒烟验证：同步发布、暂停时不提前播放、
+后加入订阅者获取轨迹，以及普通 / RViz / 重建 launch 和挂接已有 VIO 的模式。
 
 本地 EuRoC `V2_01_easy` 短序列集成验证结果：
 
@@ -251,6 +440,11 @@ colcon test-result --verbose
 - **动作快时跟踪点减少或 VIO 退化**：检查曝光、运动模糊、标定和相机 / IMU 同步，结合特征网格、检测阈值及跟踪统计排查。稠密重建不会反向修正 MSCKF 位姿。
 - **地图错位或漂移**：先检查 VIO 轨迹及外参。重置 MSCKF 世界原点后，也应清空重建地图。
 - **RViz 看不到图像或单帧点云**：检查话题和 QoS，图像 / 单帧点云订阅使用 best-effort；地图订阅使用 reliable / transient-local。
+- **RViz 没有轨迹线**：确认 VIO 已初始化且 `/odom`、`/path` 有输出；Fixed Frame 默认 `world`，Path 显示使用 reliable / transient-local QoS。
+- **`No new ground-truth match`**：先核对 bag 与真值是否属于同一序列，再比较 `/odom` 的采集时间与真值时间范围。序列开头或结尾可能没有真值，超出范围不会外推；超过 50 ms 的真值缺口或重复时间戳也会跳过。启用 `use_sim_time:=true` 时，播放 bag 加 `--clock`。
+- **APE 已打印数值，但 `Axes3D` / `docstring` 导入失败**：这是系统版与 pip 版 Matplotlib 混用导致的绘图问题。改用上面的 `evo_run.py` 命令；保存图像使用 `--save_plot`，交互显示使用 `--plot`。
+- **绘图报 `headless` / Qt backend 错误**：在无图形界面的终端使用 `evo_run.py ... --save_plot ...`；若环境预设了交互后端，显式加 `MPLBACKEND=Agg`。直接执行 `evo_ape` 时，evo 自身的后端配置可能覆盖该环境变量，项目脚本已处理这个问题。
+- **RViz 提示 `Stereo is NOT SUPPORTED`**：这是显示设备的立体渲染提示，与双目图像同步或轨迹对比无关。
 
 ## 来源与许可
 

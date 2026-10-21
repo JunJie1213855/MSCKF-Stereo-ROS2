@@ -98,6 +98,38 @@ Visualization Manager:
       Value: /odom
     Value: true
   - Alpha: 1
+    Buffer Length: 1
+    Class: rviz_default_plugins/Path
+    Color: 0; 255; 128
+    Enabled: true
+    Line Style: Lines
+    Line Width: 0.03
+    Name: VIO Path
+    Pose Style: None
+    Topic:
+      Depth: 1
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /path
+    Value: true
+  - Alpha: 1
+    Buffer Length: 1
+    Class: rviz_default_plugins/Path
+    Color: 255; 80; 80
+    Enabled: true
+    Line Style: Lines
+    Line Width: 0.03
+    Name: Ground Truth Path
+    Pose Style: None
+    Topic:
+      Depth: 1
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /ground_truth/path
+    Value: true
+  - Alpha: 1
     Autocompute Intensity Bounds: true
     Autocompute Value Bounds:
       Max Value: 10

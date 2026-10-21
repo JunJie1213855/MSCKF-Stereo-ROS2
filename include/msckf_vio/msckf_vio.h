@@ -20,6 +20,8 @@
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <nav_msgs/msg/path.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <std_srvs/srv/trigger.hpp>
@@ -212,6 +214,8 @@ class MsckfVio {
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub;
     rclcpp::Subscription<msg::CameraMeasurement>::SharedPtr feature_sub;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub;
+    nav_msgs::msg::Path path_msg;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr feature_pub;
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_pub;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reset_srv;

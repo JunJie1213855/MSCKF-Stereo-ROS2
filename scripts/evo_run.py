@@ -22,20 +22,30 @@ Usage (same arguments as the evo command, with the command named first):
     evo_run.py rpe  tum gt.txt est.txt -a -d 1 -u m --save_plot rpe.png
     evo_run.py traj tum gt.txt est.txt --save_plot traj.png
 
-Use --save_plot, not --plot: showing the plot needs PyQt6, which is not
-installed. evo appends _raw / _map to the filename it is given.
+Export-only commands default to Agg, without changing the saved evo settings.
+MPLBACKEND overrides evo's configured backend for this invocation. Interactive
+--plot requires a working display and a suitable Qt or Tk installation.
+evo appends _raw / _map to the filename it is given.
 """
 import os
+from pathlib import Path
 import sys
 
+import matplotlib
 import mpl_toolkits
 
-# Prefer the pip matplotlib's own mpl_toolkits over the pinned apt 3.5.1 copy.
-for _base in (sys.path + [os.path.join(os.path.expanduser("~"), ".local/lib")]):
-    _cand = os.path.join(_base, "python3.10/site-packages/mpl_toolkits")
-    if os.path.isdir(_cand) and "dist-packages" not in _cand:
-        mpl_toolkits.__path__ = [_cand]
-        break
+# Use the toolkit installed alongside the selected matplotlib, without assuming
+# a Python version or preferring pip when the selected matplotlib is from apt.
+toolkit_path = Path(matplotlib.__file__).resolve().parent.parent / 'mpl_toolkits'
+if toolkit_path.is_dir():
+    mpl_toolkits.__path__ = [str(toolkit_path)]
+
+from evo.tools.settings import SETTINGS  # noqa: E402
+
+if os.environ.get('MPLBACKEND'):
+    SETTINGS.plot_backend = os.environ['MPLBACKEND']
+elif '--plot' not in sys.argv and '-p' not in sys.argv:
+    SETTINGS.plot_backend = 'Agg'
 
 from evo.cli import entry_points  # noqa: E402
 

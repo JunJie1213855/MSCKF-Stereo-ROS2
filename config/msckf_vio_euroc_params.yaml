@@ -18,9 +18,9 @@ image_processor:
     cam1/T_cn_cnm1: [0.999997256477881, 0.002312067192424, 0.000376008102415, -0.110073808127187, -0.002317135723281, 0.999898048506644, 0.014089835846648, 0.000399121547014, -0.000343393120525, -0.014090668452714, 0.999900662637729, -0.000853702503357, 0.0, 0.0, 0.0, 1.0]
     grid_row: 4
     grid_col: 5
-    grid_min_feature_num: 8
-    grid_max_feature_num: 12
-    pyramid_levels: 5
+    grid_min_feature_num: 12
+    grid_max_feature_num: 20
+    pyramid_levels: 7
     patch_size: 15
     fast_threshold: 10
     max_iteration: 30

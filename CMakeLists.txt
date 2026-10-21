@@ -156,6 +156,11 @@ install(DIRECTORY include/${PROJECT_NAME}/
 
 install(DIRECTORY launch config rviz scripts docs
   DESTINATION share/${PROJECT_NAME}
+  PATTERN "__pycache__" EXCLUDE
+)
+
+install(PROGRAMS scripts/ground_truth_node.py
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 #############
@@ -164,6 +169,20 @@ install(DIRECTORY launch config rviz scripts docs
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  find_package(ament_cmake_test REQUIRED)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+  # Run only this test's own code, independent of user-installed pytest plugins.
+  set(ground_truth_test_result
+    "${AMENT_TEST_RESULTS_DIR}/${PROJECT_NAME}/test_ground_truth.xunit.xml")
+  ament_add_test(test_ground_truth
+    COMMAND "${Python3_EXECUTABLE}" -m pytest
+      "${CMAKE_CURRENT_SOURCE_DIR}/test/test_ground_truth.py"
+      "--junit-xml=${ground_truth_test_result}"
+      -o "cache_dir=${CMAKE_CURRENT_BINARY_DIR}/ground_truth_pytest_cache"
+    RESULT_FILE "${ground_truth_test_result}"
+    ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+  )
 
   # Feature initialization test
   ament_add_gtest(test_feature_init

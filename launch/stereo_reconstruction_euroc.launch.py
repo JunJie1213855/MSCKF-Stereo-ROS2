@@ -52,10 +52,22 @@ def launch_nodes(context):
         condition=IfCondition(LaunchConfiguration('start_vio')),
         launch_arguments={
             'params_file': calibration_path,
+            # The comparison is launched separately below, also when attaching
+            # to an existing VIO with start_vio:=false.
+            'ground_truth': '',
             'use_sim_time': LaunchConfiguration('use_sim_time'),
             'imu_topic': LaunchConfiguration('imu_topic'),
             'cam0_topic': LaunchConfiguration('cam0_topic'),
             'cam1_topic': LaunchConfiguration('cam1_topic'),
+        }.items())
+    ground_truth = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(PathJoinSubstitution([
+            pkg_share, 'launch', 'ground_truth.launch.py'])),
+        launch_arguments={
+            'ground_truth': LaunchConfiguration('ground_truth'),
+            'vio_params_file': calibration_path,
+            'odom_topic': LaunchConfiguration('odom_topic'),
+            'use_sim_time': LaunchConfiguration('use_sim_time'),
         }.items())
     reconstruction = Node(
         package='msckf_vio', executable='stereo_reconstruction_node',
@@ -71,7 +83,7 @@ def launch_nodes(context):
         parameters=[clock], condition=IfCondition(LaunchConfiguration('rviz')))
     # The included launch also has a params_file argument. Keep its launch
     # configurations scoped so they cannot replace reconstruction settings.
-    return [GroupAction(actions=[vio_nodes], scoped=True), reconstruction, rviz]
+    return [GroupAction(actions=[vio_nodes], scoped=True), reconstruction, ground_truth, rviz]
 
 
 def generate_launch_description():
@@ -81,6 +93,8 @@ def generate_launch_description():
                               description='Start MSCKF and its image processor.'),
         DeclareLaunchArgument('rviz', default_value='true'),
         DeclareLaunchArgument('use_sim_time', default_value='true'),
+        DeclareLaunchArgument('ground_truth', default_value='',
+                              description='Optional EuRoC ground-truth CSV or TUM file.'),
         DeclareLaunchArgument('backend', default_value='',
                               description='Override the YAML backend: sgbm, igev or s2m2.'),
         DeclareLaunchArgument('engine_path', default_value='',

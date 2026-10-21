@@ -191,6 +191,8 @@ bool MsckfVio::loadParameters() {
 
 bool MsckfVio::createRosIO() {
   odom_pub = nh->create_publisher<nav_msgs::msg::Odometry>("odom", 10);
+  path_pub = nh->create_publisher<nav_msgs::msg::Path>(
+      "path", rclcpp::QoS(1).reliable().transient_local());
   feature_pub = nh->create_publisher<sensor_msgs::msg::PointCloud2>(
       "feature_point_cloud", 10);
 
@@ -361,6 +363,12 @@ bool MsckfVio::resetCallback(
 
   // Clear the IMU msg buffer.
   imu_msg_buffer.clear();
+
+  // A manual reset starts a new trajectory at a new world origin.
+  path_msg.header.frame_id = fixed_frame_id;
+  path_msg.header.stamp = nh->now();
+  path_msg.poses.clear();
+  path_pub->publish(path_msg);
 
   // Reset the starting flags.
   is_gravity_set = false;
@@ -1447,6 +1455,20 @@ void MsckfVio::publish(const rclcpp::Time& time) {
       odom_msg.twist.covariance[i*6+j] = P_body_vel(i, j);
 
   odom_pub->publish(odom_msg);
+
+  // Keep the trajectory in the same body/world convention as odometry.
+  // Online covariance resets retain the pose, so they retain this path too.
+  if (!path_msg.poses.empty() &&
+      time < rclcpp::Time(path_msg.poses.back().header.stamp,
+                          time.get_clock_type())) {
+    path_msg.poses.clear();
+  }
+  geometry_msgs::msg::PoseStamped pose_msg;
+  pose_msg.header = odom_msg.header;
+  pose_msg.pose = odom_msg.pose.pose;
+  path_msg.header = odom_msg.header;
+  path_msg.poses.push_back(pose_msg);
+  path_pub->publish(path_msg);
 
   // Publish the 3D positions of the features that
   // has been initialized.
