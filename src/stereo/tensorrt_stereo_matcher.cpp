@@ -22,8 +22,8 @@
 #include "msckf_vio/stereo/stereo_matcher.h"
 
 namespace msckf_vio::stereo {
-static_assert(NV_TENSORRT_MAJOR == 10,
-              "The TensorRT stereo backend requires TensorRT 10.x");
+static_assert(NV_TENSORRT_MAJOR == 10 || NV_TENSORRT_MAJOR == 11,
+              "The TensorRT stereo backend supports TensorRT 10.x and 11.x");
 namespace {
 void CheckCuda(cudaError_t result, const char* operation) {
   if (result != cudaSuccess) {

@@ -11,6 +11,8 @@
 *融合点云地图的俯视效果，可观察室内墙面与场景结构。*
 
 按阶段理解实现，可阅读 [Stereo 代码阅读指南](docs/stereo_code_walkthrough.md)。
+前端的 FAST / ORB 检测器、掩膜最小间距选点和网格对照模式见
+[前端特征选择说明](docs/frontend_features.md)。
 
 ## 功能与处理流程
 

@@ -7,6 +7,7 @@
 
 #include <iostream>
 #include <algorithm>
+#include <cmath>
 #include <set>
 #include <Eigen/Dense>
 
@@ -113,6 +114,20 @@ bool ImageProcessor::loadParameters() {
   t_cam1_imu = -R_imu_cam1.t() * t_imu_cam1;
 
   // Processor parameters
+  processor_config.feature_detector =
+      params::get<string>(nh, "feature_detector", string("fast"));
+  processor_config.feature_distribution =
+      params::get<string>(nh, "feature_distribution", string("mask"));
+  processor_config.max_features = params::get<int>(nh, "max_features", 160);
+  processor_config.min_feature_distance =
+      params::get<int>(nh, "min_feature_distance", 20);
+  processor_config.feature_border =
+      params::get<int>(nh, "feature_border", 8);
+  processor_config.detection_candidates =
+      params::get<int>(nh, "detection_candidates", 2000);
+  processor_config.orb_levels = params::get<int>(nh, "orb_levels", 4);
+  processor_config.orb_scale_factor =
+      params::get<double>(nh, "orb_scale_factor", 1.2);
   processor_config.grid_row = params::get<int>(nh, "grid_row", 4);
   processor_config.grid_col = params::get<int>(nh, "grid_col", 4);
   processor_config.grid_min_feature_num =
@@ -133,6 +148,24 @@ bool ImageProcessor::loadParameters() {
       params::get<double>(nh, "ransac_threshold", 3.0);
   processor_config.stereo_threshold =
       params::get<double>(nh, "stereo_threshold", 3.0);
+
+  if ((processor_config.feature_detector != "fast" &&
+       processor_config.feature_detector != "orb") ||
+      (processor_config.feature_distribution != "mask" &&
+       processor_config.feature_distribution != "grid") ||
+      processor_config.max_features <= 0 ||
+      processor_config.min_feature_distance <= 0 ||
+      processor_config.feature_border < 0 ||
+      processor_config.feature_border >= cam0_resolution[0] / 2 ||
+      processor_config.feature_border >= cam0_resolution[1] / 2 ||
+      processor_config.detection_candidates <= 0 ||
+      processor_config.orb_levels <= 0 ||
+      !std::isfinite(processor_config.orb_scale_factor) ||
+      processor_config.orb_scale_factor <= 1.0 ||
+      processor_config.grid_row <= 0 || processor_config.grid_col <= 0) {
+    RCLCPP_ERROR(nh->get_logger(), "Invalid feature selection parameters");
+    return false;
+  }
 
   RCLCPP_INFO(nh->get_logger(), "===========================================");
   RCLCPP_INFO(nh->get_logger(), "cam0_resolution: %d, %d",
@@ -217,9 +250,17 @@ bool ImageProcessor::initialize() {
   if (!loadParameters()) return false;
   RCLCPP_INFO(nh->get_logger(), "Finish loading ROS parameters...");
 
-  // Create feature detector.
-  detector_ptr = FastFeatureDetector::create(
-      processor_config.fast_threshold);
+  // ORB is used as a detector only; the tracker remains pyramidal LK.
+  if (processor_config.feature_detector == "orb") {
+    detector_ptr = ORB::create(
+        processor_config.detection_candidates,
+        processor_config.orb_scale_factor, processor_config.orb_levels,
+        31, 0, 2, ORB::HARRIS_SCORE, 31,
+        processor_config.fast_threshold);
+  } else {
+    detector_ptr = FastFeatureDetector::create(
+        processor_config.fast_threshold);
+  }
 
   if (!createRosIO()) return false;
   RCLCPP_INFO(nh->get_logger(), "Finish creating ROS IO...");
@@ -308,10 +349,12 @@ void ImageProcessor::createImagePyramids() {
 }
 
 void ImageProcessor::initializeFirstFrame() {
+  if (processor_config.feature_distribution == "mask") {
+    detectMaskFeatures();
+    return;
+  }
   // Size of each grid.
   const Mat& img = cam0_curr_img_ptr->image;
-  static int grid_height = img.rows / processor_config.grid_row;
-  static int grid_width = img.cols / processor_config.grid_col;
 
   // Detect new features on the frist image.
   vector<KeyPoint> new_features(0);
@@ -348,9 +391,7 @@ void ImageProcessor::initializeFirstFrame() {
     const cv::Point2f& cam1_point = cam1_inliers[i];
     const float& response = response_inliers[i];
 
-    int row = static_cast<int>(cam0_point.y / grid_height);
-    int col = static_cast<int>(cam0_point.x / grid_width);
-    int code = row*processor_config.grid_col + col;
+    const int code = gridCode(cam0_point, img.size());
 
     FeatureMetaData new_feature;
     new_feature.response = response;
@@ -379,6 +420,95 @@ void ImageProcessor::initializeFirstFrame() {
   }
 
   return;
+}
+
+int ImageProcessor::gridCode(const cv::Point2f& point, cv::Size size) const {
+  return FeatureGridCode(point, size, processor_config.grid_row,
+                         processor_config.grid_col);
+}
+
+void ImageProcessor::detectMaskFeatures() {
+  const cv::Mat& image = cam0_curr_img_ptr->image;
+  FeatureMask spatial_mask(image.size(), processor_config.feature_border,
+                           processor_config.min_feature_distance);
+
+  // Preserve long-lived tracks first, then use response and ID for stable ties.
+  vector<FeatureMetaData> existing;
+  for (const auto& cell : *curr_features_ptr) {
+    existing.insert(existing.end(), cell.second.begin(), cell.second.end());
+  }
+  std::sort(existing.begin(), existing.end(),
+      [](const FeatureMetaData& lhs, const FeatureMetaData& rhs) {
+        if (lhs.lifetime != rhs.lifetime) return lhs.lifetime > rhs.lifetime;
+        if (lhs.response != rhs.response) return lhs.response > rhs.response;
+        return lhs.id < rhs.id;
+      });
+
+  curr_features_ptr->clear();
+  int accepted_count = 0;
+  for (const auto& feature : existing) {
+    if (accepted_count >= processor_config.max_features) break;
+    if (!FeatureMask::InBorder(feature.cam0_point, image.size(),
+                               processor_config.feature_border) ||
+        !FeatureMask::InBorder(feature.cam1_point,
+            cam1_curr_img_ptr->image.size(), processor_config.feature_border) ||
+        !spatial_mask.Allows(feature.cam0_point)) {
+      continue;
+    }
+    spatial_mask.Add(feature.cam0_point);
+    (*curr_features_ptr)[gridCode(feature.cam0_point, image.size())]
+        .push_back(feature);
+    ++accepted_count;
+  }
+
+  const int remaining = processor_config.max_features - accepted_count;
+  if (remaining <= 0) return;
+
+  vector<KeyPoint> candidates;
+  detector_ptr->detect(image, candidates, spatial_mask.image());
+  std::sort(candidates.begin(), candidates.end(),
+      &ImageProcessor::keyPointCompareByResponse);
+  if (candidates.size() >
+      static_cast<size_t>(processor_config.detection_candidates)) {
+    candidates.resize(processor_config.detection_candidates);
+  }
+
+  // Stereo LK is kept in small batches; spatial acceptance happens only after
+  // geometric validation so a failed match never blocks a better candidate.
+  constexpr size_t kStereoBatchSize = 128;
+  for (size_t begin = 0;
+       begin < candidates.size() && accepted_count < processor_config.max_features;
+       begin += kStereoBatchSize) {
+    const size_t end = std::min(candidates.size(), begin + kStereoBatchSize);
+    vector<Point2f> left_points;
+    left_points.reserve(end - begin);
+    for (size_t i = begin; i < end; ++i) {
+      left_points.push_back(candidates[i].pt);
+    }
+    vector<Point2f> right_points;
+    vector<unsigned char> inliers;
+    stereoMatch(left_points, right_points, inliers);
+
+    for (size_t i = 0; i < inliers.size() &&
+                       accepted_count < processor_config.max_features; ++i) {
+      const auto& left = left_points[i];
+      const auto& right = right_points[i];
+      if (!inliers[i] || !spatial_mask.Allows(left) ||
+          !FeatureMask::InBorder(right, cam1_curr_img_ptr->image.size(),
+                                 processor_config.feature_border)) {
+        continue;
+      }
+      FeatureMetaData feature;
+      feature.id = next_feature_id++;
+      feature.response = candidates[begin + i].response;
+      feature.lifetime = 1;
+      feature.cam0_point = left;
+      feature.cam1_point = right;
+      spatial_mask.Add(left);
+      (*curr_features_ptr)[gridCode(left, image.size())].push_back(feature);
+      ++accepted_count;
+    }
+  }
 }
 
 void ImageProcessor::predictFeatureTracking(
@@ -412,12 +542,6 @@ void ImageProcessor::predictFeatureTracking(
 }
 
 void ImageProcessor::trackFeatures() {
-  // Size of each grid.
-  static int grid_height =
-    cam0_curr_img_ptr->image.rows / processor_config.grid_row;
-  static int grid_width =
-    cam0_curr_img_ptr->image.cols / processor_config.grid_col;
-
   // Compute a rough relative rotation which takes a vector
   // from the previous frame to the current frame.
   Matx33f cam0_R_p_c;
@@ -562,11 +686,8 @@ void ImageProcessor::trackFeatures() {
   for (int i = 0; i < cam0_ransac_inliers.size(); ++i) {
     if (cam0_ransac_inliers[i] == 0 ||
         cam1_ransac_inliers[i] == 0) continue;
-    int row = static_cast<int>(
-        curr_matched_cam0_points[i].y / grid_height);
-    int col = static_cast<int>(
-        curr_matched_cam0_points[i].x / grid_width);
-    int code = row*processor_config.grid_col + col;
+    const int code = gridCode(curr_matched_cam0_points[i],
+                              cam0_curr_img_ptr->image.size());
     (*curr_features_ptr)[code].push_back(FeatureMetaData());
 
     FeatureMetaData& grid_new_feature = (*curr_features_ptr)[code].back();
@@ -637,10 +758,10 @@ void ImageProcessor::stereoMatch(
   // as untracked.
   for (int i = 0; i < cam1_points.size(); ++i) {
     if (inlier_markers[i] == 0) continue;
-    if (cam1_points[i].y < 0 ||
-        cam1_points[i].y > cam1_curr_img_ptr->image.rows-1 ||
-        cam1_points[i].x < 0 ||
-        cam1_points[i].x > cam1_curr_img_ptr->image.cols-1)
+    if (!FeatureMask::InBorder(cam0_points[i],
+            cam0_curr_img_ptr->image.size(), processor_config.feature_border) ||
+        !FeatureMask::InBorder(cam1_points[i],
+            cam1_curr_img_ptr->image.size(), processor_config.feature_border))
       inlier_markers[i] = 0;
   }
 
@@ -688,13 +809,11 @@ void ImageProcessor::stereoMatch(
 }
 
 void ImageProcessor::addNewFeatures() {
+  if (processor_config.feature_distribution == "mask") {
+    detectMaskFeatures();
+    return;
+  }
   const Mat& curr_img = cam0_curr_img_ptr->image;
-
-  // Size of each grid.
-  static int grid_height =
-    cam0_curr_img_ptr->image.rows / processor_config.grid_row;
-  static int grid_width =
-    cam0_curr_img_ptr->image.cols / processor_config.grid_col;
 
   // Create a mask to avoid redetecting existing features.
   Mat mask(curr_img.rows, curr_img.cols, CV_8U, Scalar(1));
@@ -726,10 +845,7 @@ void ImageProcessor::addNewFeatures() {
   vector<vector<KeyPoint> > new_feature_sieve(
       processor_config.grid_row*processor_config.grid_col);
   for (const auto& feature : new_features) {
-    int row = static_cast<int>(feature.pt.y / grid_height);
-    int col = static_cast<int>(feature.pt.x / grid_width);
-    new_feature_sieve[
-      row*processor_config.grid_col+col].push_back(feature);
+    new_feature_sieve[gridCode(feature.pt, curr_img.size())].push_back(feature);
   }
 
   new_features.clear();
@@ -784,9 +900,7 @@ void ImageProcessor::addNewFeatures() {
     const cv::Point2f& cam1_point = cam1_inliers[i];
     const float& response = response_inliers[i];
 
-    int row = static_cast<int>(cam0_point.y / grid_height);
-    int col = static_cast<int>(cam0_point.x / grid_width);
-    int code = row*processor_config.grid_col + col;
+    const int code = gridCode(cam0_point, curr_img.size());
 
     FeatureMetaData new_feature;
     new_feature.response = response;
@@ -829,6 +943,7 @@ void ImageProcessor::addNewFeatures() {
 }
 
 void ImageProcessor::pruneGridFeatures() {
+  if (processor_config.feature_distribution == "mask") return;
   for (auto& item : *curr_features_ptr) {
     auto& grid_features = item.second;
     // Continue if the number of features in this grid does
@@ -864,11 +979,10 @@ void ImageProcessor::undistortPoints(
       new_intrinsics[0], 0.0, new_intrinsics[2],
       0.0, new_intrinsics[1], new_intrinsics[3],
       0.0, 0.0, 1.0);
-
-  if (distortion_model == "radtan") {
+  if (distortion_model == "radtan") {  // 径向
     cv::undistortPoints(pts_in, pts_out, K, distortion_coeffs,
                         rectification_matrix, K_new);
-  } else if (distortion_model == "equidistant") {
+  } else if (distortion_model == "equidistant") { // 等距鱼眼
     cv::fisheye::undistortPoints(pts_in, pts_out, K, distortion_coeffs,
                                  rectification_matrix, K_new);
   } else {

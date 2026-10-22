@@ -25,6 +25,7 @@
 
 #include <msckf_vio/msg/camera_measurement.hpp>
 #include <msckf_vio/msg/tracking_info.hpp>
+#include <msckf_vio/feature_mask.h>
 
 namespace msckf_vio {
 
@@ -56,6 +57,14 @@ private:
    *    feature detection and tracking.
    */
   struct ProcessorConfig {
+    std::string feature_detector;
+    std::string feature_distribution;
+    int max_features;
+    int min_feature_distance;
+    int feature_border;
+    int detection_candidates;
+    int orb_levels;
+    double orb_scale_factor;
     int grid_row;
     int grid_col;
     int grid_min_feature_num;
@@ -177,6 +186,8 @@ private:
    *    features are uniformly distributed on the image.
    */
   void addNewFeatures();
+  void detectMaskFeatures();
+  int gridCode(const cv::Point2f& point, cv::Size size) const;
 
   /*
    * @brief pruneGridFeatures

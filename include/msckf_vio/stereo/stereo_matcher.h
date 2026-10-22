@@ -79,8 +79,8 @@ struct S2m2Parameters {
   int input_width = 0;
   int input_height = 0;
   int device_id = 0;
-  double min_confidence = 0.5;
-  double min_visibility = 0.5;
+  double min_confidence = 0.7;
+  double min_visibility = 0.7;
 };
 
 class S2m2Matcher final : public StereoMatcher {

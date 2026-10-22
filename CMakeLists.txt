@@ -198,6 +198,10 @@ if(BUILD_TESTING)
   target_include_directories(test_math_utils PRIVATE include)
   target_link_libraries(test_math_utils Eigen3::Eigen)
 
+  ament_add_gtest(test_feature_mask test/feature_mask_test.cpp)
+  target_include_directories(test_feature_mask PRIVATE include)
+  target_link_libraries(test_feature_mask ${OpenCV_LIBS})
+
   ament_add_gtest(test_stereo_reconstruction test/stereo_reconstruction_test.cpp)
   target_link_libraries(test_stereo_reconstruction stereo_reconstruction_lib)
 

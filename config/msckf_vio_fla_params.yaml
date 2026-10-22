@@ -6,6 +6,14 @@
 #   ros2 launch msckf_vio msckf_vio_euroc.launch.py
 image_processor:
   ros__parameters:
+    feature_detector: fast
+    feature_distribution: mask
+    max_features: 60
+    min_feature_distance: 20
+    feature_border: 8
+    detection_candidates: 2000
+    orb_levels: 4
+    orb_scale_factor: 1.2
     cam0/distortion_model: equidistant
     cam0/resolution: [960, 800]
     cam0/intrinsics: [606.57934, 606.73233, 474.93081, 402.27722]
