@@ -1,0 +1,64 @@
+stereo_reconstruction:
+  ros__parameters:
+    # Calibration and odometry frames are loaded from the same MSCKF parameter
+    # file by the launch; do not duplicate them here.
+    backend: sgbm
+    # Independent choices: stereo matching backend and map fusion method.
+    fusion_method: tsdf
+    rectification_alpha: 0.0
+    left_rect_frame_id: cam0_rect_optical_frame
+    right_rect_frame_id: cam1_rect_optical_frame
+    min_depth: 0.3
+    max_depth: 10.0
+    pixel_stride: 2
+    opencv_threads: 2
+    stereo_sync_queue_size: 20
+    max_pending_frames: 4
+    pose_cache_size: 400
+    pose_tolerance_sec: 0.0
+    pose_wait_sec: 0.3
+    voxel_size: 0.05
+    max_voxels: 500000
+    keyframe_translation: 0.1
+    keyframe_rotation_deg: 5.0
+    map_publish_period_sec: 0.5
+    save_map_path: /tmp/stereo_map.pcd
+    tsdf:
+      truncation_distance: 0.15
+      max_weight: 100.0
+      min_weight: 1.0
+      integration_stride: 2
+    igev:
+      engine_path: ""
+      left_input_name: left
+      right_input_name: right
+      output_name: disparity
+      # 0 reads static dimensions from the engine. The supplied ONNX uses
+      # [1,3,480,768], even though its filename contains 480_752.
+      input_width: 0
+      input_height: 0
+      padding_multiple: 32
+      padding_mode: right_bottom
+      device_id: 0
+    s2m2:
+      engine_path: ""
+      left_input_name: input_left
+      right_input_name: input_right
+      output_name: output_disp
+      visibility_output_name: output_occ
+      confidence_output_name: output_conf
+      # Auto-read H/W from the engine; EuRoC needs [1,3,480,768], not [1,3,768,480].
+      input_width: 0
+      input_height: 0
+      device_id: 0
+      min_confidence: 0.1
+      min_visibility: 0.5
+    sgbm:
+      min_disparity: 0
+      num_disparities: 128
+      block_size: 5
+      uniqueness_ratio: 10
+      speckle_window_size: 100
+      speckle_range: 2
+      disp12_max_diff: 1
+      pre_filter_cap: 31
