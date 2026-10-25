@@ -11,30 +11,36 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "Eigen/Geometry"
 #include "cv_bridge/cv_bridge.h"
+#include "geometry_msgs/msg/pose_stamped.hpp"
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "message_filters/subscriber.h"
 #include "message_filters/sync_policies/exact_time.h"
 #include "message_filters/synchronizer.h"
 #include "nav_msgs/msg/odometry.hpp"
+#include "nav_msgs/msg/path.hpp"
 #include "opencv2/core.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/camera_info.hpp"
 #include "sensor_msgs/msg/point_field.hpp"
 #include "sensor_msgs/point_cloud2_iterator.hpp"
 #include "std_msgs/msg/header.hpp"
+#include "std_msgs/msg/string.hpp"
 #include "std_srvs/srv/trigger.hpp"
-#include "tf2_ros/static_transform_broadcaster.h"
-
 #include "stereo_recon/stereo/reconstruction.h"
-#include "stereo_recon/stereo/tsdf_map.h"
 #include "stereo_recon/stereo/stereo_matcher.h"
+#include "stereo_recon/stereo/submap_mapper.h"
+#include "stereo_recon/stereo/tsdf_map.h"
+#include "tf2_ros/static_transform_broadcaster.h"
+#include "tf2_ros/transform_broadcaster.h"
 
 namespace stereo_recon {
 using Image = sensor_msgs::msg::Image;
@@ -50,13 +56,29 @@ class ReconstructionNode final : public rclcpp::Node {
     CreateRectifier();
     CreateMatcher();
     CreateRosInterfaces();
-    worker_ = std::thread(&ReconstructionNode::RunWorker, this);
-    RCLCPP_INFO(
-        get_logger(),
-        "Stereo reconstruction: %s, %dx%d, pose %s <- %s, exact stereo sync, fusion=%s",
-        matcher_->name().c_str(), rectifier_->size().width,
-        rectifier_->size().height, fixed_frame_.c_str(), body_frame_.c_str(),
-        fusion_method_.c_str());
+    try {
+      if (ba_enabled_) {
+        mapping_worker_ =
+            std::thread(&ReconstructionNode::RunMappingWorker, this);
+      }
+      worker_ = std::thread(&ReconstructionNode::RunWorker, this);
+    } catch (...) {
+      Stop();
+      throw;
+    }
+    RCLCPP_INFO(get_logger(),
+                "Stereo reconstruction: %s, %dx%d, pose %s <- %s, exact stereo "
+                "sync, fusion=%s",
+                matcher_->name().c_str(), rectifier_->size().width,
+                rectifier_->size().height, fixed_frame_.c_str(),
+                body_frame_.c_str(), fusion_method_.c_str());
+    if (ba_enabled_) {
+      RCLCPP_INFO(
+          get_logger(), "Point-cloud BA: Ceres, map frame=%s, archive=%s",
+          map_frame_.c_str(),
+          mapper_->archive_path().empty() ? "disabled"
+                                          : mapper_->archive_path().c_str());
+    }
   }
 
   ~ReconstructionNode() override { Stop(); }
@@ -75,6 +97,7 @@ class ReconstructionNode final : public rclcpp::Node {
                   processed_.load(), fused_.load(), dropped_.load(),
                   missing_pose_.load());
     }
+    if (mapping_worker_.joinable()) mapping_worker_.join();
   }
 
  private:
@@ -82,6 +105,82 @@ class ReconstructionNode final : public rclcpp::Node {
     Image::ConstSharedPtr left, right;
     uint64_t generation;
   };
+
+  struct MappingJob {
+    MappingKeyframe frame;
+    std::vector<ColorPoint> current_cloud;
+    uint64_t generation;
+  };
+
+  void LoadBaParameters(const TsdfParameters& tsdf) {
+    ba_enabled_ = declare_parameter<bool>("ba.enabled", true);
+    map_frame_ =
+        declare_parameter<std::string>("ba.map_frame_id", "stereo_map");
+    mapping_queue_capacity_ = DeclarePositiveInt("ba.max_pending_keyframes", 2);
+    SubmapMapperParameters mapping;
+    mapping.tsdf = tsdf;
+    auto& ba = mapping.ba;
+    for (const auto& [name, value] : std::vector<std::pair<std::string, int*>>{
+             {"window_size", &ba.window_size},
+             {"sample_stride", &ba.sample_stride},
+             {"max_samples_per_frame", &ba.max_samples_per_frame},
+             {"max_samples_per_cluster", &ba.max_samples_per_cluster},
+             {"min_points_per_plane", &ba.min_points_per_plane},
+             {"min_frames_per_plane", &ba.min_frames_per_plane},
+             {"min_planes", &ba.min_planes},
+             {"max_planes", &ba.max_planes},
+             {"max_voxel_depth", &ba.max_voxel_depth},
+             {"max_iterations", &ba.max_iterations},
+             {"num_threads", &ba.num_threads}}) {
+      *value = declare_parameter<int>("ba." + name, *value);
+    }
+    for (const auto& [name, value] :
+         std::vector<std::pair<std::string, double*>>{
+             {"root_voxel_size", &ba.root_voxel_size},
+             {"plane_eigenvalue_ratio", &ba.plane_eigenvalue_ratio},
+             {"max_plane_rms", &ba.max_plane_rms},
+             {"min_plane_spread", &ba.min_plane_spread},
+             {"min_normal_eigenvalue", &ba.min_normal_eigenvalue},
+             {"disparity_sigma", &ba.disparity_sigma},
+             {"depth_edge_absolute", &ba.depth_edge_absolute},
+             {"depth_edge_relative", &ba.depth_edge_relative},
+             {"noise_floor", &ba.noise_floor},
+             {"huber_delta", &ba.huber_delta},
+             {"vio_translation_sigma", &ba.vio_translation_sigma},
+             {"vio_rotation_sigma_deg", &ba.vio_rotation_sigma_deg},
+             {"max_translation_update", &ba.max_translation_update},
+             {"max_rotation_update_deg", &ba.max_rotation_update_deg},
+             {"max_vio_translation", &ba.max_vio_translation},
+             {"max_vio_rotation_deg", &ba.max_vio_rotation_deg},
+             {"max_solver_time_sec", &ba.max_solver_time_sec}}) {
+      *value = declare_parameter<double>("ba." + name, *value);
+    }
+    mapping.submap_keyframes = DeclarePositiveInt("ba.submap_keyframes", 20);
+    mapping.overlap_keyframes = DeclarePositiveInt("ba.overlap_keyframes", 4);
+    mapping.optimize_every_n_keyframes =
+        DeclarePositiveInt("ba.optimize_every_n_keyframes", 1);
+    mapping.max_trajectory_poses =
+        DeclarePositiveInt("ba.max_trajectory_poses", 20000);
+    mapping.archive_directory =
+        declare_parameter<std::string>("ba.archive_directory", "");
+    declare_parameter<std::string>("save_trajectory_path",
+                                   "/tmp/stereo_ba.tum");
+    if (ba_enabled_) {
+      if (fusion_method_ != "tsdf") {
+        throw std::invalid_argument(
+            "Point-cloud BA requires fusion_method=tsdf");
+      }
+      if (map_frame_.empty() || map_frame_ == fixed_frame_ ||
+          map_frame_ == body_frame_ || map_frame_ == left_frame_ ||
+          map_frame_ == right_frame_) {
+        throw std::invalid_argument(
+            "BA map frame must be a distinct nonempty frame");
+      }
+      mapper_ = std::make_unique<SubmapMapper>(std::move(mapping));
+    } else {
+      map_frame_ = fixed_frame_;
+    }
+  }
 
   int DeclarePositiveInt(const std::string& name, int default_value) {
     const int value = declare_parameter<int>(name, default_value);
@@ -135,12 +234,16 @@ class ReconstructionNode final : public rclcpp::Node {
     TsdfParameters tsdf;
     tsdf.voxel_size = voxel_size;
     tsdf.max_voxels = max_voxels;
-    tsdf.truncation_distance = declare_parameter<double>("tsdf.truncation_distance", 0.15);
-    tsdf.max_weight = static_cast<float>(declare_parameter<double>("tsdf.max_weight", 100.0));
-    tsdf.min_weight = static_cast<float>(declare_parameter<double>("tsdf.min_weight", 1.0));
+    tsdf.truncation_distance =
+        declare_parameter<double>("tsdf.truncation_distance", 0.15);
+    tsdf.max_weight =
+        static_cast<float>(declare_parameter<double>("tsdf.max_weight", 100.0));
+    tsdf.min_weight =
+        static_cast<float>(declare_parameter<double>("tsdf.min_weight", 1.0));
     tsdf.integration_stride = DeclarePositiveInt("tsdf.integration_stride", 2);
+    LoadBaParameters(tsdf);
     if (fusion_method_ == "tsdf") {
-      tsdf_map_ = std::make_unique<TsdfMap>(tsdf);
+      if (!ba_enabled_) tsdf_map_ = std::make_unique<TsdfMap>(tsdf);
     } else if (fusion_method_ == "voxel") {
       map_ = std::make_unique<VoxelMap>(voxel_size, max_voxels);
     } else {
@@ -246,6 +349,15 @@ class ReconstructionNode final : public rclcpp::Node {
         "stereo/points_world", image_qos);
     map_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
         "stereo/map", rclcpp::QoS(1).reliable().transient_local());
+    optimized_path_pub_ = create_publisher<nav_msgs::msg::Path>(
+        "stereo/optimized_path", rclcpp::QoS(1).reliable().transient_local());
+    optimized_odom_pub_ = create_publisher<Odometry>(
+        "stereo/optimized_odometry", rclcpp::QoS(10));
+    ba_status_pub_ = create_publisher<std_msgs::msg::String>(
+        "stereo/ba/status", rclcpp::QoS(1).reliable().transient_local());
+    if (ba_enabled_) {
+      correction_tf_ = std::make_unique<tf2_ros::TransformBroadcaster>(this);
+    }
     static_tf_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(this);
     static_tf_->sendTransform(std::vector<geometry_msgs::msg::TransformStamped>{
         MakeCameraTransform(left_frame_, rectifier_->body_from_left_rect()),
@@ -295,6 +407,31 @@ class ReconstructionNode final : public rclcpp::Node {
             response->success = true;
             response->message =
                 "Saved " + std::to_string(points.size()) + " points to " + path;
+          } catch (const std::exception& error) {
+            response->success = false;
+            response->message = error.what();
+          }
+        },
+        rmw_qos_profile_services_default, service_group_);
+    save_trajectory_service_ = create_service<Trigger>(
+        "stereo/save_trajectory",
+        [this](const std::shared_ptr<Trigger::Request>,
+               std::shared_ptr<Trigger::Response> response) {
+          std::vector<MappingPose> trajectory;
+          {
+            std::lock_guard<std::mutex> lock(map_mutex_);
+            if (mapping_snapshot_) trajectory = mapping_snapshot_->trajectory;
+          }
+          if (trajectory.empty()) {
+            response->success = false;
+            response->message = "No optimized keyframe trajectory available";
+            return;
+          }
+          try {
+            const auto path = get_parameter("save_trajectory_path").as_string();
+            SaveTrajectory(path, trajectory);
+            response->success = true;
+            response->message = "Saved keyframe trajectory to " + path;
           } catch (const std::exception& error) {
             response->success = false;
             response->message = error.what();
@@ -354,14 +491,23 @@ class ReconstructionNode final : public rclcpp::Node {
   void ResetLocked() {
     ++generation_;
     jobs_.clear();
+    mapping_jobs_.clear();
     pose_buffer_->Clear();
     {
       std::lock_guard<std::mutex> lock(map_mutex_);
-      if (tsdf_map_) tsdf_map_->Clear();
-      else map_->Clear();
+      if (tsdf_map_)
+        tsdf_map_->Clear();
+      else if (map_)
+        map_->Clear();
+      mapping_snapshot_.reset();
+      map_from_vio_.setIdentity();
       keyframes_->Clear();
       map_stamp_ = now();
       map_dirty_ = true;
+      nav_msgs::msg::Path empty_path;
+      empty_path.header.frame_id = map_frame_;
+      empty_path.header.stamp = map_stamp_;
+      optimized_path_pub_->publish(empty_path);
     }
     condition_.notify_all();
   }
@@ -405,9 +551,19 @@ class ReconstructionNode final : public rclcpp::Node {
     Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
     pose.linear() = q.normalized().toRotationMatrix();
     pose.translation() = position;
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    pose_buffer_->Add(rclcpp::Time(message->header.stamp).nanoseconds(), pose);
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      pose_buffer_->Add(rclcpp::Time(message->header.stamp).nanoseconds(),
+                        pose);
+    }
     condition_.notify_all();
+    if (ba_enabled_) {
+      std::lock_guard<std::mutex> lock(map_mutex_);
+      auto correction = MakeCameraTransform(fixed_frame_, map_from_vio_);
+      correction.header.frame_id = map_frame_;
+      correction.header.stamp = message->header.stamp;
+      correction_tf_->sendTransform(correction);
+    }
   }
 
   cv::Mat DecodeImage(const Image::ConstSharedPtr& message) {
@@ -462,9 +618,9 @@ class ReconstructionNode final : public rclcpp::Node {
     // setPointCloud2FieldsByString. Standard XYZ/RGB stays intact at 16 bytes
     // per point, reducing fragmentation for dense best-effort DDS clouds.
     using Field = sensor_msgs::msg::PointField;
-    modifier.setPointCloud2Fields(4,
-        "x", 1, Field::FLOAT32, "y", 1, Field::FLOAT32,
-        "z", 1, Field::FLOAT32, "rgb", 1, Field::FLOAT32);
+    modifier.setPointCloud2Fields(4, "x", 1, Field::FLOAT32, "y", 1,
+                                  Field::FLOAT32, "z", 1, Field::FLOAT32, "rgb",
+                                  1, Field::FLOAT32);
     modifier.resize(points.size());
     sensor_msgs::PointCloud2Iterator<float> x(message, "x"), y(message, "y"),
         z(message, "z");
@@ -485,6 +641,115 @@ class ReconstructionNode final : public rclcpp::Node {
       ++b;
     }
     return message;
+  }
+
+  std::optional<Eigen::Isometry3d> WaitForPose(const Job& job) {
+    std::optional<Eigen::Isometry3d> pose;
+    std::unique_lock<std::mutex> lock(state_mutex_);
+    const int64_t stamp = rclcpp::Time(job.left->header.stamp).nanoseconds();
+    condition_.wait_for(
+        lock, std::chrono::duration<double>(pose_wait_sec_), [&] {
+          pose = pose_buffer_->Find(stamp, pose_tolerance_ns_);
+          return stopping_ || job.generation != generation_ || pose.has_value();
+        });
+    return pose;
+  }
+
+  void PublishMappingOutputs(const MappingSnapshot& snapshot,
+                             uint64_t generation) {
+    std_msgs::msg::Header header;
+    header.frame_id = map_frame_;
+    header.stamp = rclcpp::Time(snapshot.stamp_ns);
+    const auto current_cloud = MakePointCloud(snapshot.current_points, header);
+    nav_msgs::msg::Path path;
+    path.header = header;
+    for (const auto& entry : snapshot.trajectory) {
+      geometry_msgs::msg::PoseStamped pose;
+      pose.header = header;
+      pose.header.stamp = rclcpp::Time(entry.stamp_ns);
+      const auto transform = MakeCameraTransform(left_frame_, entry.pose);
+      pose.pose.position.x = transform.transform.translation.x;
+      pose.pose.position.y = transform.transform.translation.y;
+      pose.pose.position.z = transform.transform.translation.z;
+      pose.pose.orientation = transform.transform.rotation;
+      path.poses.push_back(pose);
+    }
+    Odometry odometry;
+    if (!path.poses.empty()) {
+      odometry.header = header;
+      odometry.child_frame_id = left_frame_;
+      odometry.pose.pose = path.poses.back().pose;
+      // No calibrated posterior covariance is computed by this mapper.
+    }
+    const auto& ba = snapshot.optimization;
+    std::ostringstream status;
+    status << "accepted=" << ba.accepted << " reason=" << ba.reason
+           << " planes=" << ba.planes << " clusters=" << ba.clusters
+           << " cost=" << ba.initial_cost << "->" << ba.final_cost
+           << " normal_eigenvalue=" << ba.normal_eigenvalue
+           << " ba_ms=" << ba.time_ms
+           << " mapping_ms=" << snapshot.total_time_ms
+           << " active_keyframes=" << snapshot.active_keyframes
+           << " frozen_submaps=" << snapshot.frozen_submaps
+           << " capacity_reached=" << snapshot.capacity_reached
+           << " mapping_queue_drops=" << mapping_dropped_.load()
+           << " stereo_queue_drops=" << dropped_.load()
+           << " missing_pose=" << missing_pose_.load();
+    std_msgs::msg::String message;
+    message.data = status.str();
+    // Construct large messages before locking, then serialize publication
+    // against clear. Old generation data cannot reappear after a reset.
+    std::lock_guard<std::mutex> lock(map_mutex_);
+    if (generation != generation_ || stopping_) return;
+    if (world_points_pub_->get_subscription_count() > 0) {
+      world_points_pub_->publish(current_cloud);
+    }
+    optimized_path_pub_->publish(path);
+    if (!path.poses.empty()) optimized_odom_pub_->publish(odometry);
+    ba_status_pub_->publish(message);
+    RCLCPP_INFO_THROTTLE(get_logger(), diagnostic_clock_, 3000, "%s",
+                         message.data.c_str());
+  }
+
+  void RunMappingWorker() {
+    std::optional<uint64_t> worker_generation = generation_.load();
+    for (;;) {
+      MappingJob job;
+      {
+        std::unique_lock<std::mutex> lock(state_mutex_);
+        condition_.wait(lock,
+                        [this] { return stopping_ || !mapping_jobs_.empty(); });
+        if (stopping_) return;
+        job = std::move(mapping_jobs_.front());
+        mapping_jobs_.pop_front();
+      }
+      try {
+        if (!worker_generation || *worker_generation != job.generation) {
+          mapper_->Clear();
+          worker_generation = job.generation;
+        }
+        const auto cancelled = [this, &job] {
+          return stopping_.load() || job.generation != generation_.load();
+        };
+        auto result = mapper_->Process(std::move(job.frame),
+                                       std::move(job.current_cloud), cancelled);
+        if (!result || cancelled()) continue;
+        auto snapshot = std::make_shared<MappingSnapshot>(std::move(*result));
+        {
+          std::lock_guard<std::mutex> lock(map_mutex_);
+          if (cancelled()) continue;
+          mapping_snapshot_ = snapshot;
+          map_from_vio_ = snapshot->map_from_vio;
+          map_stamp_ = rclcpp::Time(snapshot->stamp_ns, RCL_ROS_TIME);
+          map_dirty_ = true;
+          ++fused_;
+        }
+        PublishMappingOutputs(*snapshot, job.generation);
+      } catch (const std::exception& error) {
+        RCLCPP_ERROR(get_logger(), "Skipping mapping keyframe: %s",
+                     error.what());
+      }
+    }
   }
 
   void RunWorker() {
@@ -514,6 +779,18 @@ class ReconstructionNode final : public rclcpp::Node {
   void ProcessFrame(const Job& job) {
     const auto start = std::chrono::steady_clock::now();
     double fusion_ms = 0.0;
+    // Select candidates before expensive depth inference. The timestamp still
+    // refers to image acquisition, never to GPU completion or wall-clock time.
+    const auto pose = WaitForPose(job);
+    if (stopping_ || job.generation != generation_ || !rclcpp::ok()) return;
+    if (ba_enabled_) {
+      if (!pose) {
+        ++missing_pose_;
+        return;
+      }
+      std::lock_guard<std::mutex> lock(map_mutex_);
+      if (!keyframes_->ShouldInsert(*pose)) return;
+    }
     // 阶段 1：解码与校正。校正保持标定分辨率，并改变相机坐标轴方向。
     cv::Mat left, right;
     rectifier_->Rectify(DecodeImage(job.left), DecodeImage(job.right), left,
@@ -546,31 +823,44 @@ class ReconstructionNode final : public rclcpp::Node {
       points_pub_->publish(MakePointCloud(geometry.points, left_header));
     }
     ++processed_;
-    // 阶段 4：始终按图像采集时间匹配位姿，不能使用推理完成时的最新位姿。
-    std::optional<Eigen::Isometry3d> pose;
-    {
-      std::unique_lock<std::mutex> lock(state_mutex_);
-      const int64_t stamp = rclcpp::Time(job.left->header.stamp).nanoseconds();
-      condition_.wait_for(
-          lock, std::chrono::duration<double>(pose_wait_sec_), [&] {
-            pose = pose_buffer_->Find(stamp, pose_tolerance_ns_);
-            return stopping_ || job.generation != generation_ ||
-                   pose.has_value();
-          });
-      if (stopping_) {
-        return;
-      }
-      if (job.generation != generation_) {
-        return;
-      }
-    }
+    // 阶段 4：使用推理前按采集时间查到的同一位姿。
     if (!pose) {
       ++missing_pose_;
     } else if (!geometry.points.empty() ||
-               (tsdf_map_ && cv::countNonZero(geometry.depth > 0) > 0)) {
+               ((tsdf_map_ || ba_enabled_) &&
+                cv::countNonZero(geometry.depth > 0) > 0)) {
       // 阶段 5：世界←机体←校正相机。逆校正旋转已经包含在后一个变换中。
       const Eigen::Isometry3d t_world_camera =
           *pose * rectifier_->body_from_left_rect();
+      if (ba_enabled_) {
+        const auto& projection = rectifier_->left_projection();
+        const auto& right_projection = rectifier_->right_projection();
+        MappingKeyframe frame;
+        frame.stamp_ns = rclcpp::Time(job.left->header.stamp).nanoseconds();
+        frame.depth = geometry.depth;
+        frame.color = left.clone();
+        frame.intrinsics =
+            cv::Matx33d(projection(0, 0), 0, projection(0, 2), 0,
+                        projection(1, 1), projection(1, 2), 0, 0, 1);
+        frame.baseline =
+            std::abs(right_projection(0, 3) / right_projection(0, 0) -
+                     projection(0, 3) / projection(0, 0));
+        frame.vio_pose = t_world_camera;
+        // Lock order is state -> map, shared with reset. A reset cannot accept
+        // an old candidate or advance the new selector with an old pose.
+        std::lock_guard<std::mutex> state_lock(state_mutex_);
+        std::lock_guard<std::mutex> map_lock(map_mutex_);
+        if (job.generation != generation_ || stopping_) return;
+        while (mapping_jobs_.size() >= mapping_queue_capacity_) {
+          mapping_jobs_.pop_front();
+          ++mapping_dropped_;
+        }
+        mapping_jobs_.push_back(
+            {std::move(frame), geometry.points, job.generation});
+        keyframes_->Accept(*pose);
+        condition_.notify_all();
+        return;
+      }
       auto world_header = left_header;
       world_header.frame_id = fixed_frame_;
       if (world_points_pub_->get_subscription_count() > 0) {
@@ -587,16 +877,18 @@ class ReconstructionNode final : public rclcpp::Node {
         bool capacity_reached = false;
         if (tsdf_map_) {
           const auto& projection = rectifier_->left_projection();
-          const cv::Matx33d intrinsics(
-              projection(0, 0), 0, projection(0, 2),
-              0, projection(1, 1), projection(1, 2), 0, 0, 1);
-          capacity_reached = tsdf_map_->Integrate(
-              geometry.depth, left, intrinsics, t_world_camera);
+          const cv::Matx33d intrinsics(projection(0, 0), 0, projection(0, 2), 0,
+                                       projection(1, 1), projection(1, 2), 0, 0,
+                                       1);
+          capacity_reached = tsdf_map_->Integrate(geometry.depth, left,
+                                                  intrinsics, t_world_camera);
         } else {
-          capacity_reached = map_->Integrate(geometry.points, t_world_camera) > 0;
+          capacity_reached =
+              map_->Integrate(geometry.points, t_world_camera) > 0;
         }
         fusion_ms = std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - fusion_start).count();
+                        std::chrono::steady_clock::now() - fusion_start)
+                        .count();
         keyframes_->Accept(*pose);
         map_stamp_ = rclcpp::Time(job.left->header.stamp);
         map_dirty_ = true;
@@ -613,15 +905,21 @@ class ReconstructionNode final : public rclcpp::Node {
                                .count();
     RCLCPP_INFO_THROTTLE(
         get_logger(), diagnostic_clock_, 5000,
-        "Stereo %.1f ms (includes pose wait), fusion=%s %.1f ms, processed=%" PRIu64
+        "Stereo %.1f ms (includes pose wait), fusion=%s %.1f ms, "
+        "processed=%" PRIu64
         " "
         "keyframes=%" PRIu64 " queue_drops=%" PRIu64 " missing_pose=%" PRIu64,
-        elapsed, fusion_method_.c_str(), fusion_ms, processed_.load(), fused_.load(), dropped_.load(),
-        missing_pose_.load());
+        elapsed, fusion_method_.c_str(), fusion_ms, processed_.load(),
+        fused_.load(), dropped_.load(), missing_pose_.load());
   }
 
-  // Caller holds map_mutex_. TSDF publishes observed zero crossings, not voxel centres.
+  // Caller holds map_mutex_. TSDF publishes observed zero crossings, not voxel
+  // centres.
   std::vector<ColorPoint> MapPointsLocked() const {
+    if (ba_enabled_) {
+      return mapping_snapshot_ ? mapping_snapshot_->points
+                               : std::vector<ColorPoint>{};
+    }
     return tsdf_map_ ? tsdf_map_->points() : map_->points();
   }
 
@@ -631,7 +929,7 @@ class ReconstructionNode final : public rclcpp::Node {
       return;
     }
     std_msgs::msg::Header header;
-    header.frame_id = fixed_frame_;
+    header.frame_id = map_frame_;
     header.stamp = map_stamp_;
     map_pub_->publish(MakePointCloud(MapPointsLocked(), header));
     map_dirty_ = false;
@@ -639,6 +937,12 @@ class ReconstructionNode final : public rclcpp::Node {
 
   std::string fixed_frame_, body_frame_, left_frame_, right_frame_;
   std::string fusion_method_;
+  bool ba_enabled_ = true;
+  std::string map_frame_;
+  size_t mapping_queue_capacity_ = 2;
+  std::unique_ptr<SubmapMapper> mapper_;
+  std::shared_ptr<const MappingSnapshot> mapping_snapshot_;
+  Eigen::Isometry3d map_from_vio_ = Eigen::Isometry3d::Identity();
   rclcpp::Clock diagnostic_clock_{RCL_STEADY_TIME};
   double min_depth_, max_depth_, pose_wait_sec_;
   double map_publish_period_sec_;
@@ -654,12 +958,15 @@ class ReconstructionNode final : public rclcpp::Node {
   std::mutex state_mutex_, map_mutex_;
   std::condition_variable condition_;
   std::deque<Job> jobs_;
+  std::deque<MappingJob> mapping_jobs_;
   std::optional<int64_t> last_image_stamp_;
-  bool stopping_ = false, map_dirty_ = true;
+  std::atomic<bool> stopping_{false};
+  bool map_dirty_ = true;
   rclcpp::Time map_stamp_{0, 0, RCL_ROS_TIME};
   std::atomic<uint64_t> generation_{0}, dropped_{0}, processed_{0}, fused_{0},
       missing_pose_{0};
-  std::thread worker_;
+  std::atomic<uint64_t> mapping_dropped_{0};
+  std::thread worker_, mapping_worker_;
   message_filters::Subscriber<Image> left_sub_, right_sub_;
   std::unique_ptr<message_filters::Synchronizer<SyncPolicy>> synchronizer_;
   rclcpp::Subscription<Odometry>::SharedPtr odom_sub_;
@@ -669,9 +976,14 @@ class ReconstructionNode final : public rclcpp::Node {
       right_info_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr points_pub_,
       world_points_pub_, map_pub_;
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr optimized_path_pub_;
+  rclcpp::Publisher<Odometry>::SharedPtr optimized_odom_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr ba_status_pub_;
+  std::unique_ptr<tf2_ros::TransformBroadcaster> correction_tf_;
   std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_;
   rclcpp::CallbackGroup::SharedPtr service_group_;
-  rclcpp::Service<Trigger>::SharedPtr clear_service_, save_service_;
+  rclcpp::Service<Trigger>::SharedPtr clear_service_, save_service_,
+      save_trajectory_service_;
   rclcpp::TimerBase::SharedPtr map_timer_;
 };
 }  // namespace stereo_recon

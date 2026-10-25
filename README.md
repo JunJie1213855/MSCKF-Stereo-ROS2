@@ -2,6 +2,11 @@
 
 独立 ROS 2 Humble 双目稠密重建包，提供 SGBM、IGEV TensorRT、S2M2 TensorRT、图像校正、深度投影与 TSDF/体素点云融合。通过标准 `sensor_msgs/Image` 和 `nav_msgs/Odometry` 接口接入任意满足标定/坐标约定的里程计；C++ 构建不依赖 `msckf_vio`。
 
+默认启用 Ceres 局部点云 BA、推理前关键帧筛选及活动 TSDF 子图重建。
+任务书见 [点云 BA 任务书](docs/plan/point_cloud_ba.md)，算法、归档、离线对照及
+资源限制见 [点云 BA 使用说明](docs/point_cloud_ba.md)。构建需要 `libceres-dev`
+和 `libyaml-cpp-dev`；`point_cloud_ba:=false` 关闭优化。
+
 ## 编译
 
 ```bash
@@ -61,6 +66,12 @@ ros2 bag play /path/to/euroc_ros2_bag --clock --rate 0.1 \
 - `/stereo/save_map`、`/stereo/clear_map`：保存与清空服务。
 
 RViz 同时显示当前帧和融合地图。模型文件放在 `weights/` 或由绝对路径指定；不安装进 share，也不提交版本库。旧源码目录的 `weights` 链接指向本包，兼容已有 engine 路径。
+
+BA 模式下地图和当前建图帧点云使用 `stereo_map`，新增 `/stereo/optimized_path`、
+`/stereo/optimized_odometry`、`/stereo/ba/status` 与 `/stereo/save_trajectory`。
+`archive_directory:=/path/to/archive` 开启原始关键帧归档，
+`ros2 run stereo_recon stereo_ba_offline ARCHIVE OUTPUT_PREFIX` 用于离线处理。
+只选中的候选帧执行深度推理，地图输出合并活动/冻结 TSDF 表面。
 
 详细参数、S2M2 的 RGB/NCHW 输入（UINT8、FP32 或 FP16，数值范围 0–255）和居中补边约定见 [重建说明](docs/stereo_reconstruction.md)，代码流程见 [代码说明](docs/stereo_code_walkthrough.md)。默认使用 TSDF 融合，`fusion_method:=voxel` 可切换体素质心融合；参数与算法见 [TSDF 融合说明](docs/tsdf_fusion.md)。
 

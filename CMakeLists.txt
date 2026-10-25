@@ -18,6 +18,8 @@ find_package(message_filters REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(Threads REQUIRED)
+find_package(Ceres 2.0 REQUIRED)
+find_package(yaml-cpp REQUIRED)
 
 add_library(stereo_recon_lib SHARED
   src/stereo/stereo_matcher.cpp
@@ -25,6 +27,8 @@ add_library(stereo_recon_lib SHARED
   src/stereo/s2m2_processing.cpp
   src/stereo/reconstruction.cpp
   src/stereo/tsdf_map.cpp
+  src/stereo/point_cloud_ba.cpp
+  src/stereo/submap_mapper.cpp
 )
 target_compile_features(stereo_recon_lib PUBLIC cxx_std_17)
 target_include_directories(stereo_recon_lib PUBLIC
@@ -32,7 +36,8 @@ target_include_directories(stereo_recon_lib PUBLIC
   $<INSTALL_INTERFACE:include>
   ${OpenCV_INCLUDE_DIRS}
 )
-target_link_libraries(stereo_recon_lib PUBLIC Eigen3::Eigen ${OpenCV_LIBS})
+target_link_libraries(stereo_recon_lib PUBLIC Eigen3::Eigen ${OpenCV_LIBS}
+  PRIVATE Ceres::ceres yaml-cpp)
 
 add_executable(stereo_reconstruction_node src/stereo_reconstruction_node.cpp)
 ament_target_dependencies(stereo_reconstruction_node
@@ -41,7 +46,10 @@ ament_target_dependencies(stereo_reconstruction_node
 target_link_libraries(stereo_reconstruction_node stereo_recon_lib Threads::Threads)
 include(cmake/TensorRTBackend.cmake)
 
-install(TARGETS stereo_recon_lib stereo_reconstruction_node
+add_executable(stereo_ba_offline src/stereo_ba_offline.cpp)
+target_link_libraries(stereo_ba_offline stereo_recon_lib)
+
+install(TARGETS stereo_recon_lib stereo_reconstruction_node stereo_ba_offline
   EXPORT stereo_reconTargets
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib

@@ -23,6 +23,45 @@ stereo_reconstruction:
     keyframe_rotation_deg: 5.0
     map_publish_period_sec: 0.5
     save_map_path: /tmp/stereo_map.pcd
+    save_trajectory_path: /tmp/stereo_ba.tum
+    ba:
+      enabled: true
+      map_frame_id: stereo_map
+      max_pending_keyframes: 2
+      window_size: 10
+      submap_keyframes: 20
+      overlap_keyframes: 4
+      optimize_every_n_keyframes: 1
+      max_trajectory_poses: 20000
+      # Optional raw keyframe recording. Each run creates its own session folder.
+      archive_directory: ""
+      sample_stride: 4
+      max_samples_per_frame: 5000
+      max_samples_per_cluster: 64
+      min_points_per_plane: 24
+      min_frames_per_plane: 3
+      min_planes: 12
+      max_planes: 200
+      root_voxel_size: 0.8
+      max_voxel_depth: 2
+      plane_eigenvalue_ratio: 0.1
+      max_plane_rms: 0.05
+      min_plane_spread: 0.02
+      min_normal_eigenvalue: 0.01
+      disparity_sigma: 0.5
+      depth_edge_absolute: 0.05
+      depth_edge_relative: 0.02
+      noise_floor: 0.005
+      huber_delta: 2.5
+      vio_translation_sigma: 0.15
+      vio_rotation_sigma_deg: 5.0
+      max_translation_update: 0.2
+      max_rotation_update_deg: 5.0
+      max_vio_translation: 1.0
+      max_vio_rotation_deg: 15.0
+      max_iterations: 15
+      max_solver_time_sec: 0.15
+      num_threads: 1
     tsdf:
       truncation_distance: 0.15
       max_weight: 100.0

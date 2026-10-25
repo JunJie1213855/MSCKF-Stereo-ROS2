@@ -120,6 +120,22 @@ Visualization Manager:
     Enabled: true
     Line Style: Lines
     Line Width: 0.03
+    Name: Optimized Stereo Path
+    Pose Style: None
+    Topic:
+      Depth: 1
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /stereo/optimized_path
+    Value: true
+  - Alpha: 1
+    Buffer Length: 1
+    Class: rviz_default_plugins/Path
+    Color: 100; 160; 255
+    Enabled: true
+    Line Style: Lines
+    Line Width: 0.03
     Name: Ground Truth Path
     Pose Style: None
     Topic:

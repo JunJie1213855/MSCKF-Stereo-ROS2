@@ -1,5 +1,9 @@
 # TSDF 融合
 
+当前默认启用局部点云 BA：推理前筛选关键帧，优化后重新融合活动 TSDF 子图。
+以下固定 VIO 位姿的单 TSDF 描述对应 `point_cloud_ba:=false`；
+启用 BA 时的子图、坐标、表面合并和资源限制见 [点云 BA](point_cloud_ba.md)。
+
 `fusion_method` 与匹配 `backend` 独立。SGBM、IGEV、S2M2 的深度均可进入 TSDF；默认启用 TSDF，`fusion_method:=voxel` 选择原体素质心融合。
 
 ```bash

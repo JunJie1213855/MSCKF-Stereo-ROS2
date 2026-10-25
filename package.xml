@@ -17,6 +17,8 @@
   <depend>message_filters</depend>
   <depend>eigen</depend>
   <depend>libopencv-dev</depend>
+  <depend>libceres-dev</depend>
+  <depend>yaml-cpp</depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>ament_index_python</exec_depend>

@@ -29,11 +29,26 @@ def launch_nodes(context):
     backend = LaunchConfiguration('backend').perform(context)
     engine_path = LaunchConfiguration('engine_path').perform(context)
     overrides = {}
+    with open(parameter_path, encoding='utf-8') as stream:
+        configured = yaml.safe_load(stream)['stereo_reconstruction']['ros__parameters']
     fusion_method = LaunchConfiguration('fusion_method').perform(context)
     if fusion_method:
         if fusion_method not in ('tsdf', 'voxel'):
             raise ValueError('fusion_method must be tsdf or voxel')
         overrides['fusion_method'] = fusion_method
+    ba_argument = LaunchConfiguration('point_cloud_ba').perform(context).lower()
+    if ba_argument not in ('', 'true', 'false'):
+        raise ValueError('point_cloud_ba must be true or false')
+    ba_config = configured.get('ba', {})
+    ba_enabled = (ba_argument == 'true') if ba_argument else (
+        ba_config.get('enabled', True)
+        and (fusion_method or configured.get('fusion_method', 'tsdf')) == 'tsdf')
+    overrides['ba.enabled'] = ba_enabled
+    archive = LaunchConfiguration('archive_directory').perform(context)
+    if archive:
+        overrides['ba.archive_directory'] = archive
+    display_frame = (ba_config.get('map_frame_id', 'stereo_map') if ba_enabled
+                     else calibration['fixed_frame_id'])
     if backend:
         overrides['backend'] = backend
     if engine_path:
@@ -53,7 +68,8 @@ def launch_nodes(context):
                          ('odom', LaunchConfiguration('odom_topic'))]),
         Node(package='rviz2', executable='rviz2', name='rviz2', output='screen',
              arguments=['-d', PathJoinSubstitution([
-                 FindPackageShare('stereo_recon'), 'rviz', 'rviz_stereo_reconstruction.rviz'])],
+                 FindPackageShare('stereo_recon'), 'rviz', 'rviz_stereo_reconstruction.rviz']),
+                        '-f', display_frame],
              parameters=[clock], condition=IfCondition(LaunchConfiguration('rviz'))),
     ]
 
@@ -71,6 +87,10 @@ def generate_launch_description():
                               description='Override YAML backend: sgbm, igev or s2m2.'),
         DeclareLaunchArgument('fusion_method', default_value='',
                               description='Override YAML fusion: tsdf or voxel.'),
+        DeclareLaunchArgument('point_cloud_ba', default_value='',
+                              description='Override YAML BA: true or false; BA requires TSDF.'),
+        DeclareLaunchArgument('archive_directory', default_value='',
+                              description='Optional raw BA keyframe archive root.'),
         DeclareLaunchArgument('engine_path', default_value=''),
         DeclareLaunchArgument('cam0_topic', default_value='/cam0/image_raw'),
         DeclareLaunchArgument('cam1_topic', default_value='/cam1/image_raw'),
