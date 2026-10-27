@@ -1,5 +1,10 @@
 # stereo_recon
 
+> 当前 AirSLAM 组合工作区使用 TensorRT 11.3.0.99 / CUDA 12.1。
+> 请先阅读 [组合构建与运行说明](../airslam_recon_bringup/docs/BUILD_AND_RUN.md)，
+> 使用其中的 AirSLAM 相机位姿标定；下方 MSCKF 示例属于另一种接入方式。
+
+
 独立 ROS 2 Humble 双目稠密重建包，提供 SGBM、IGEV TensorRT、S2M2 TensorRT、图像校正、深度投影与 TSDF/体素点云融合。通过标准 `sensor_msgs/Image` 和 `nav_msgs/Odometry` 接口接入任意满足标定/坐标约定的里程计；C++ 构建不依赖 `msckf_vio`。
 
 默认启用 Ceres 局部点云 BA、推理前关键帧筛选及活动 TSDF 子图重建。

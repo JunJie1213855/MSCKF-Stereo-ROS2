@@ -33,6 +33,7 @@
 #include "sensor_msgs/msg/point_field.hpp"
 #include "sensor_msgs/point_cloud2_iterator.hpp"
 #include "std_msgs/msg/header.hpp"
+#include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "std_srvs/srv/trigger.hpp"
 #include "stereo_recon/stereo/reconstruction.h"
@@ -96,6 +97,8 @@ class ReconstructionNode final : public rclcpp::Node {
                   " missing_pose=%" PRIu64,
                   processed_.load(), fused_.load(), dropped_.load(),
                   missing_pose_.load());
+      RCLCPP_INFO(get_logger(), "Stereo pairs skipped during initialization=%" PRIu64,
+                  initialization_skipped_.load());
     }
     if (mapping_worker_.joinable()) mapping_worker_.join();
   }
@@ -192,6 +195,8 @@ class ReconstructionNode final : public rclcpp::Node {
 
   // 配置只在启动时读取；地图保存路径除外，它可由服务调用时动态读取。
   void LoadParameters() {
+    ready_topic_ = declare_parameter<std::string>("odometry_ready_topic", "");
+    input_ready_ = ready_topic_.empty();
     fixed_frame_ = declare_parameter<std::string>("fixed_frame_id", "world");
     body_frame_ = declare_parameter<std::string>("pose_child_frame_id", "odom");
     left_frame_ = declare_parameter<std::string>("left_rect_frame_id",
@@ -334,6 +339,21 @@ class ReconstructionNode final : public rclcpp::Node {
 
   // 图像回调只排队；推理在独立线程完成，避免阻塞 IMU 和里程计回调。
   void CreateRosInterfaces() {
+    if (!ready_topic_.empty()) {
+      ready_sub_ = create_subscription<std_msgs::msg::Bool>(
+          ready_topic_, rclcpp::QoS(1).reliable().transient_local(),
+          [this](std_msgs::msg::Bool::ConstSharedPtr message) {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            if (input_ready_ && !message->data) ResetLocked();
+            const bool changed = input_ready_ != message->data;
+            input_ready_ = message->data;
+            if (changed) {
+              RCLCPP_INFO(get_logger(), "Odometry initialization %s; stereo input %s",
+                          input_ready_ ? "ready" : "pending",
+                          input_ready_ ? "enabled" : "paused");
+            }
+          });
+    }
     const auto image_qos = rclcpp::SensorDataQoS().keep_last(10);
     left_pub_ = create_publisher<Image>("stereo/left/image_rect", image_qos);
     right_pub_ = create_publisher<Image>("stereo/right/image_rect", image_qos);
@@ -516,6 +536,10 @@ class ReconstructionNode final : public rclcpp::Node {
                 const Image::ConstSharedPtr& right) {
     const int64_t stamp = rclcpp::Time(left->header.stamp).nanoseconds();
     std::lock_guard<std::mutex> lock(state_mutex_);
+    if (!input_ready_) {
+      ++initialization_skipped_;
+      return;
+    }
     if (last_image_stamp_ && stamp < *last_image_stamp_) {
       ResetLocked();
       RCLCPP_WARN(get_logger(),
@@ -939,6 +963,8 @@ class ReconstructionNode final : public rclcpp::Node {
   std::string fusion_method_;
   bool ba_enabled_ = true;
   std::string map_frame_;
+  std::string ready_topic_;
+  bool input_ready_ = true;
   size_t mapping_queue_capacity_ = 2;
   std::unique_ptr<SubmapMapper> mapper_;
   std::shared_ptr<const MappingSnapshot> mapping_snapshot_;
@@ -965,11 +991,12 @@ class ReconstructionNode final : public rclcpp::Node {
   rclcpp::Time map_stamp_{0, 0, RCL_ROS_TIME};
   std::atomic<uint64_t> generation_{0}, dropped_{0}, processed_{0}, fused_{0},
       missing_pose_{0};
-  std::atomic<uint64_t> mapping_dropped_{0};
+  std::atomic<uint64_t> mapping_dropped_{0}, initialization_skipped_{0};
   std::thread worker_, mapping_worker_;
   message_filters::Subscriber<Image> left_sub_, right_sub_;
   std::unique_ptr<message_filters::Synchronizer<SyncPolicy>> synchronizer_;
   rclcpp::Subscription<Odometry>::SharedPtr odom_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr ready_sub_;
   rclcpp::Publisher<Image>::SharedPtr left_pub_, right_pub_, disparity_pub_,
       depth_pub_;
   rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr left_info_pub_,
